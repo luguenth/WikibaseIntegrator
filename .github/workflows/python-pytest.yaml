@@ -28,9 +28,17 @@ jobs:
     strategy:
       matrix:
         python-version: [ '3.7', '3.8', '3.9', '3.10', '3.11', '3.12-dev' ]
+        mediawiki-version: [ 'wikibase/wikibase-bundle:1.35.7-wmde.7', 'wikibase/wikibase-bundle:1.38.5-wmde.10', 'wikibase/wikibase-bundle:1.39.1-wmde.11' ]
 
     steps:
       - uses: actions/checkout@v3.5.3
+
+      - name: Set up Docker containers with
+        run: |
+          docker-compose -f ./docker-compose.yml -f ./docker-compose.extra.yml up -d
+        working-directory: ./tests/docker-compose
+        env:
+          WIKIBASE_BUNDLE_IMAGE_NAME: ${{ matrix.mediawiki-version }}
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v4.6.1
