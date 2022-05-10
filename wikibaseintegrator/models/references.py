@@ -136,6 +136,9 @@ class Reference(BaseModel):
         }
         return json_data
 
+    def __eq__(self, other):
+        return self.snaks == other.snaks
+
     def __iter__(self):
         return iter(self.snaks)
 

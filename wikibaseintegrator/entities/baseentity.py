@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from copy import copy
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Type, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Type, Union
 
 from wikibaseintegrator import wbi_fastrun
 from wikibaseintegrator.datatypes import BaseDataType
@@ -22,8 +22,8 @@ class BaseEntity:
     ETYPE = 'base-entity'
     subclasses: List[Type[BaseEntity]] = []
 
-    def __init__(self, api: Optional['WikibaseIntegrator'] = None, title: Optional[str] = None, pageid: Optional[int] = None, lastrevid: Optional[int] = None,
-                 type: Optional[str] = None, id: Optional[str] = None, claims: Optional[Claims] = None, is_bot: Optional[bool] = None, login: Optional[_Login] = None):
+    def __init__(self, api: Optional['WikibaseIntegrator'] = None, title: Optional[str] = None, pageid: Optional[int] = None, lastrevid: Optional[int] = None, type: Optional[str] = None, id: Optional[str] = None,
+                 claims: Optional[Claims] = None, is_bot: Optional[bool] = None, login: Optional[_Login] = None):
         if not api:
             from wikibaseintegrator import WikibaseIntegrator
             self.api = WikibaseIntegrator()
@@ -104,9 +104,13 @@ class BaseEntity:
         return self.__claims
 
     @claims.setter
-    def claims(self, value: Claims):
-        if not isinstance(value, Claims):
+    def claims(self, value: Union[Claim, Claims]):
+        if not isinstance(value, Claims) and not isinstance(value, Claim):
             raise TypeError
+
+        if isinstance(value, Claim):
+            value = Claims().add(claims=value)
+
         self.__claims = value
 
     def add_claims(self, claims: Union[Claim, List[Claim], Claims], action_if_exists: ActionIfExists = ActionIfExists.APPEND_OR_REPLACE) -> BaseEntity:
@@ -197,6 +201,21 @@ class BaseEntity:
         """
         return self._write(data={}, clear=True, **kwargs)
 
+    def get_claims(self, property: str, login: Optional[_Login] = None, allow_anonymous: bool = True, is_bot: Optional[bool] = None, **kwargs: Any):
+        params = {
+            'action': 'wbgetclaims',
+            'entity': self.id,
+            'property': property,
+            'format': 'json'
+        }
+
+        login = login or self.api.login
+        is_bot = is_bot if is_bot is not None else self.api.is_bot
+
+        json_data = mediawiki_api_call_helper(data=params, login=login, allow_anonymous=allow_anonymous, is_bot=is_bot, **kwargs)
+        self.claims.from_json(json_data['claims'])
+        return self
+
     def _write(self, data: Optional[Dict] = None, summary: Optional[str] = None, login: Optional[_Login] = None, allow_anonymous: bool = False, limit_claims: Optional[List[Union[str, int]]] = None, clear: bool = False, as_new: bool = False,
                is_bot: Optional[bool] = None, **kwargs: Any) -> Dict[str, Any]:
         """
@@ -276,21 +295,19 @@ class BaseEntity:
 
             return delete_page(title=None, pageid=self.pageid, login=login, allow_anonymous=allow_anonymous, is_bot=is_bot, **kwargs)
 
-    def write_required(self, base_filter: Optional[List[BaseDataType | List[BaseDataType]]] = None, action_if_exists: ActionIfExists = ActionIfExists.REPLACE_ALL,
-                       **kwargs: Any) -> bool:
+    def write_required(self, base_filter: List[BaseDataType | List[BaseDataType]], **kwargs: Any) -> bool:
         fastrun_container = wbi_fastrun.get_fastrun_container(base_filter=base_filter, **kwargs)
 
-        if base_filter is None:
-            base_filter = []
-
-        claims_to_check = []
+        pfilter: Set = set()
         for claim in self.claims:
             if claim.mainsnak.property_number in base_filter:
-                claims_to_check.append(claim)
+                pfilter.add(claim.mainsnak.property_number)
+
+        property_filter: List[str] = list(pfilter)
 
         # TODO: Add check_language_data
 
-        return fastrun_container.write_required(data=claims_to_check, cqid=self.id, action_if_exists=action_if_exists)
+        return fastrun_container.write_required(entity=self, property_filter=property_filter)
 
     def get_entity_url(self, wikibase_url: Optional[str] = None) -> str:
         from wikibaseintegrator.wbi_config import config

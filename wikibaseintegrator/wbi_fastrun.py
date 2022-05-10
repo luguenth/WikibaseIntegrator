@@ -1,21 +1,16 @@
 from __future__ import annotations
 
-import collections
-import copy
 import logging
-from collections import defaultdict
-from functools import lru_cache
-from itertools import chain
-from typing import TYPE_CHECKING, Dict, List, Optional, Set, Type, Union
+import re
+from typing import TYPE_CHECKING, Dict, List, Optional, Type, Union
 
 from wikibaseintegrator.datatypes import BaseDataType
-from wikibaseintegrator.models import Claim
+from wikibaseintegrator.models import Claim, Claims, Qualifiers, Reference, References
 from wikibaseintegrator.wbi_config import config
-from wikibaseintegrator.wbi_enums import ActionIfExists, WikibaseDatatype
-from wikibaseintegrator.wbi_helpers import execute_sparql_query, format_amount
+from wikibaseintegrator.wbi_helpers import execute_sparql_query
 
 if TYPE_CHECKING:
-    from wikibaseintegrator.models import Claims
+    from wikibaseintegrator.entities import BaseEntity
 
 log = logging.getLogger(__name__)
 
@@ -23,641 +18,462 @@ fastrun_store: List[FastRunContainer] = []
 
 
 class FastRunContainer:
-    def __init__(self, base_data_type: Type[BaseDataType], mediawiki_api_url: Optional[str] = None, sparql_endpoint_url: Optional[str] = None, wikibase_url: Optional[str] = None,
-                 base_filter: Optional[List[BaseDataType | List[BaseDataType]]] = None, use_refs: bool = False, case_insensitive: bool = False):
-        self.reconstructed_statements: List[BaseDataType] = []
-        self.rev_lookup: defaultdict[str, Set[str]] = defaultdict(set)
-        self.rev_lookup_ci: defaultdict[str, Set[str]] = defaultdict(set)
-        self.prop_data: Dict[str, Dict] = {}
-        self.loaded_langs: Dict[str, Dict] = {}
-        self.base_filter: List[BaseDataType | List[BaseDataType]] = []
-        self.base_filter_string = ''
-        self.prop_dt_map: Dict[str, str] = {}
+    """
 
-        self.base_data_type: Type[BaseDataType] = base_data_type
-        self.mediawiki_api_url: str = str(mediawiki_api_url or config['MEDIAWIKI_API_URL'])
-        self.sparql_endpoint_url: str = str(sparql_endpoint_url or config['SPARQL_ENDPOINT_URL'])
-        self.wikibase_url: str = str(wikibase_url or config['WIKIBASE_URL'])
-        self.use_refs: bool = use_refs
-        self.case_insensitive: bool = case_insensitive
+    :param base_filter: The default filter to initialize the dataset. A list made of BaseDataType or list of BaseDataType.
+    :param base_data_type: The default data type to create objects.
+    :param use_qualifiers: Use qualifiers during fastrun. Enabled by default.
+    :param use_references: Use references during fastrun. Disabled by default.
+    :param use_cache: Put data returned by WDQS in cache. Enabled by default.
+    :param case_insensitive: <not used at this moment>
+    :param sparql_endpoint_url: SPARLQ endpoint URL.
+    :param wikibase_url: Wikibase URL used for the concept URI.
+    """
 
-        if base_filter and any(base_filter):
-            self.base_filter = base_filter
-            for k in self.base_filter:
-                if isinstance(k, BaseDataType):
-                    if k.mainsnak.datavalue:
-                        self.base_filter_string += '?item <{wb_url}/prop/direct/{prop_nr}> {entity} .\n'.format(
-                            wb_url=self.wikibase_url, prop_nr=k.mainsnak.property_number, entity=k.get_sparql_value().format(wb_url=self.wikibase_url))
-                    else:
-                        self.base_filter_string += '?item <{wb_url}/prop/direct/{prop_nr}> ?zz{prop_nr} .\n'.format(
-                            wb_url=self.wikibase_url, prop_nr=k.mainsnak.property_number)
-                elif isinstance(k, list) and len(k) == 2 and isinstance(k[0], BaseDataType) and isinstance(k[1], BaseDataType):
-                    if k[0].mainsnak.datavalue:
-                        self.base_filter_string += '?item <{wb_url}/prop/direct/{prop_nr}>/<{wb_url}/prop/direct/{prop_nr2}>* {entity} .\n'.format(
-                            wb_url=self.wikibase_url, prop_nr=k[0].mainsnak.property_number, prop_nr2=k[1].mainsnak.property_number,
-                            entity=k[0].get_sparql_value().format(wb_url=self.wikibase_url))
-                    else:
-                        self.base_filter_string += '?item <{wb_url}/prop/direct/{prop_nr1}>/<{wb_url}/prop/direct/{prop_nr2}>* ?zz{prop_nr1}{prop_nr2} .\n'.format(
-                            wb_url=self.wikibase_url, prop_nr1=k[0].mainsnak.property_number, prop_nr2=k[1].mainsnak.property_number)
-                else:
-                    raise ValueError("base_filter must be an instance of BaseDataType or a list of instances of BaseDataType")
+    # TODO: Add support for case_insensitive
 
-    def reconstruct_statements(self, qid: str) -> List[BaseDataType]:
-        reconstructed_statements: List[BaseDataType] = []
+    data: Dict[str, Dict[str, List[Dict[str, str]]]]
 
-        if qid not in self.prop_data:
-            self.reconstructed_statements = reconstructed_statements
-            return reconstructed_statements
+    def __init__(self, base_filter: List[BaseDataType | List[BaseDataType]], base_data_type: Optional[Type[BaseDataType]] = None, use_qualifiers: bool = True, use_references: bool = False,
+                 use_cache: bool = True, case_insensitive: bool = False, sparql_endpoint_url: Optional[str] = None, wikibase_url: Optional[str] = None):
 
-        for prop_nr, dt in self.prop_data[qid].items():
-            # get datatypes for qualifier props
-            q_props = set(chain(*([x[0] for x in d['qual']] for d in dt.values())))
-            r_props = set(chain(*(set(chain(*([y[0] for y in x] for x in d['ref'].values()))) for d in dt.values())))
-            props = q_props | r_props
-            for prop in props:
-                if prop not in self.prop_dt_map:
-                    self.prop_dt_map.update({prop: self.get_prop_datatype(prop)})
-            # reconstruct statements from frc (including unit, qualifiers, and refs)
-            for _, d in dt.items():
-                qualifiers = []
-                for q in d['qual']:
-                    f = [x for x in self.base_data_type.subclasses if x.DTYPE == self.prop_dt_map[q[0]]][0]
-                    # TODO: Add support for more data type (Time, MonolingualText, GlobeCoordinate)
-                    if self.prop_dt_map[q[0]] == 'quantity':
-                        qualifiers.append(f(value=q[1], prop_nr=q[0], unit=q[2]))
-                    else:
-                        qualifiers.append(f(value=q[1], prop_nr=q[0]))
+        for k in base_filter:
+            if not isinstance(k, BaseDataType) and not (isinstance(k, list) and len(k) == 2 and isinstance(k[0], BaseDataType) and isinstance(k[1], BaseDataType)):
+                raise ValueError("base_filter must be an instance of BaseDataType or a list of instances of BaseDataType")
 
-                references = []
-                for _, refs in d['ref'].items():
-                    this_ref = []
-                    for ref in refs:
-                        f = [x for x in self.base_data_type.subclasses if x.DTYPE == self.prop_dt_map[ref[0]]][0]
-                        this_ref.append(f(value=ref[1], prop_nr=ref[0]))
-                    references.append(this_ref)
+        self.data: Dict[str, Dict[str, List[Dict[str, str]]]] = {}
 
-                f = [x for x in self.base_data_type.subclasses if x.DTYPE == self.prop_dt_map[prop_nr]][0]
-                # TODO: Add support for more data type
-                if self.prop_dt_map[prop_nr] == 'quantity':
-                    datatype = f(prop_nr=prop_nr, qualifiers=qualifiers, references=references, unit=d['unit'])
-                    datatype.parse_sparql_value(value=d['v'], unit=d['unit'])
-                else:
-                    datatype = f(prop_nr=prop_nr, qualifiers=qualifiers, references=references)
-                    datatype.parse_sparql_value(value=d['v'])
-                reconstructed_statements.append(datatype)
+        self.base_filter = base_filter
+        self.base_data_type = base_data_type or BaseDataType
+        self.sparql_endpoint_url = str(sparql_endpoint_url or config['SPARQL_ENDPOINT_URL'])
+        self.wikibase_url = str(wikibase_url or config['WIKIBASE_URL'])
+        self.use_qualifiers = use_qualifiers
+        self.use_references = use_references
+        self.use_cache = use_cache
+        self.case_insensitive = case_insensitive
+        self.properties_type: Dict[str, str] = {}
 
-        # this isn't used. done for debugging purposes
-        self.reconstructed_statements = reconstructed_statements
-        return reconstructed_statements
+        if self.case_insensitive:
+            raise ValueError("Case insensitive does not work for the moment.")
 
-    def get_items(self, claims: Union[List[Claim], Claims, Claim], cqid: Optional[str] = None) -> Optional[Set[str]]:
+    def load_statements(self, claims: Union[List[Claim], Claims, Claim], use_cache: Optional[bool] = None, wb_url: Optional[str] = None, limit: int = 10000) -> None:
         """
-        Get items ID from a SPARQL endpoint
+        Load the statements related to the given claims into the internal cache of the current object.
 
-        :param claims: A list of claims the entities should have
-        :param cqid:
-        :return: a list of entity ID or None
-        :exception: if there is more than one claim
+        :param claims: A Claim, Claims or list of Claim
+        :param wb_url: The first part of the concept URI of entities.
+        :param limit: The limit to request at one time.
+        :param use_cache: Put data returned by WDQS in cache. Enabled by default.
+        :return:
         """
-        match_sets = []
-
         if isinstance(claims, Claim):
             claims = [claims]
         elif (not isinstance(claims, list) or not all(isinstance(n, Claim) for n in claims)) and not isinstance(claims, Claims):
             raise ValueError("claims must be an instance of Claim or Claims or a list of Claim")
 
-        for claim in claims:
-            # skip to next if statement has no value or no data type defined, e.g. for deletion objects
-            if not claim.mainsnak.datavalue and not claim.mainsnak.datatype:
-                continue
+        use_cache = bool(use_cache or self.use_cache)
 
+        wb_url = wb_url or self.wikibase_url
+
+        for claim in claims:
             prop_nr = claim.mainsnak.property_number
 
-            if prop_nr not in self.prop_dt_map:
-                log.debug("%s not found in fastrun", prop_nr)
-
-                if isinstance(claim, BaseDataType) and type(claim) != BaseDataType:  # pylint: disable=unidiomatic-typecheck
-                    self.prop_dt_map.update({prop_nr: claim.DTYPE})
-                else:
-                    self.prop_dt_map.update({prop_nr: self.get_prop_datatype(prop_nr)})
-                self._query_data(prop_nr=prop_nr, use_units=self.prop_dt_map[prop_nr] == 'quantity')
-
-            # noinspection PyProtectedMember
-            current_value = claim.get_sparql_value()
-
-            if self.prop_dt_map[prop_nr] == 'wikibase-item':
-                current_value = claim.mainsnak.datavalue['value']['id']
-
-            log.debug(current_value)
-            # if self.case_insensitive:
-            #     log.debug("case insensitive enabled")
-            #     log.debug(self.rev_lookup_ci)
-            # else:
-            #     log.debug(self.rev_lookup)
-
-            if current_value in self.rev_lookup:
-                # quick check for if the value has ever been seen before, if not, write required
-                match_sets.append(set(self.rev_lookup[current_value]))
-            elif self.case_insensitive and current_value.casefold() in self.rev_lookup_ci:
-                match_sets.append(set(self.rev_lookup_ci[current_value.casefold()]))
-            else:
-                log.debug("no matches for rev lookup for %s", current_value)
-
-        if not match_sets:
-            return None
-
-        if cqid:
-            matching_qids = {cqid}
-        else:
-            matching_qids = match_sets[0].intersection(*match_sets[1:])
-
-        return matching_qids
-
-    def get_item(self, claims: Union[List[Claim], Claims, Claim], cqid: Optional[str] = None) -> Optional[str]:
-        """
-
-        :param claims: A list of claims the entity should have
-        :param cqid:
-        :return: An entity ID, None if there is more than one.
-        """
-
-        matching_qids: Optional[Set[str]] = self.get_items(claims=claims, cqid=cqid)
-
-        if matching_qids is None:
-            return None
-
-        # check if there are any items that have all of these values
-        # if not, a write is required no matter what
-        if not len(matching_qids) == 1:
-            log.debug("no matches (%s)", len(matching_qids))
-            return None
-
-        return matching_qids.pop()
-
-    def write_required(self, data: List[Claim], action_if_exists: ActionIfExists = ActionIfExists.REPLACE_ALL, cqid: Optional[str] = None) -> bool:
-        """
-        Check if a write is required
-
-        :param data:
-        :param action_if_exists:
-        :param cqid:
-        :return: Return True if the write is required
-        """
-        del_props = set()
-        data_props = set()
-        append_props = []
-        if action_if_exists == ActionIfExists.APPEND_OR_REPLACE:
-            append_props = [x.mainsnak.property_number for x in data]
-
-        for x in data:
-            if x.mainsnak.datavalue and x.mainsnak.datatype:
-                data_props.add(x.mainsnak.property_number)
-        qid = self.get_item(data, cqid)
-
-        if not qid:
-            return True
-
-        reconstructed_statements = self.reconstruct_statements(qid)
-        tmp_rs = copy.deepcopy(reconstructed_statements)
-
-        # handle append properties
-        for p in append_props:
-            app_data = [x for x in data if x.mainsnak.property_number == p]  # new statements
-            rec_app_data = [x for x in tmp_rs if x.mainsnak.property_number == p]  # orig statements
-            comp = []
-            for x in app_data:
-                for y in rec_app_data:
-                    if x.mainsnak.datavalue == y.mainsnak.datavalue:
-                        if y.equals(x, include_ref=self.use_refs) and action_if_exists != ActionIfExists.FORCE_APPEND:
-                            comp.append(True)
-
-            # comp = [True for x in app_data for y in rec_app_data if x.equals(y, include_ref=self.use_refs)]
-            if len(comp) != len(app_data):
-                log.debug("failed append: %s", p)
-                return True
-
-        tmp_rs = [x for x in tmp_rs if x.mainsnak.property_number not in append_props and x.mainsnak.property_number in data_props]
-
-        for date in data:
-            # ensure that statements meant for deletion get handled properly
-            reconst_props = {x.mainsnak.property_number for x in tmp_rs}
-            if not date.mainsnak.datatype and date.mainsnak.property_number in reconst_props:
-                log.debug("returned from delete prop handling")
-                return True
-
-            if not date.mainsnak.datavalue or not date.mainsnak.datatype:
-                # Ignore the deletion statements which are not in the reconstructed statements.
+            # Load each property from the Wikibase instance or the cache
+            if use_cache and prop_nr in self.data:
                 continue
 
-            if date.mainsnak.property_number in append_props:
-                # TODO: check if value already exist and already have the same value
-                continue
+            offset = 0
 
-            if not date.mainsnak.datavalue and not date.mainsnak.datatype:
-                del_props.add(date.mainsnak.property_number)
-
-            # this is where the magic happens
-            # date is a new statement, proposed to be written
-            # tmp_rs are the reconstructed statements == current state of the item
-            bool_vec = []
-            for x in tmp_rs:
-                if (x == date or (self.case_insensitive and x.mainsnak.datavalue.casefold() == date.mainsnak.datavalue.casefold())) and x.mainsnak.property_number not in del_props:
-                    bool_vec.append(x.equals(date, include_ref=self.use_refs))
-                else:
-                    bool_vec.append(False)
-            # bool_vec = [x.equals(date, include_ref=self.use_refs, fref=self.ref_comparison_f) and
-            # x.mainsnak.property_number not in del_props for x in tmp_rs]
-
-            log.debug("bool_vec: %s", bool_vec)
-            log.debug("-----------------------------------")
-            for x in tmp_rs:
-                if x == date and x.mainsnak.property_number not in del_props:
-                    log.debug([x.mainsnak.property_number, x.mainsnak.datavalue, [z.datavalue for z in x.qualifiers]])
-                    log.debug([date.mainsnak.property_number, date.mainsnak.datavalue, [z.datavalue for z in date.qualifiers]])
-                elif x.mainsnak.property_number == date.mainsnak.property_number:
-                    log.debug([x.mainsnak.property_number, x.mainsnak.datavalue, [z.datavalue for z in x.qualifiers]])
-                    log.debug([date.mainsnak.property_number, date.mainsnak.datavalue, [z.datavalue for z in date.qualifiers]])
-
-            if not any(bool_vec):
-                log.debug(len(bool_vec))
-                log.debug("fast run failed at %s", date.mainsnak.property_number)
-                return True
-
-            log.debug("fast run success")
-            tmp_rs.pop(bool_vec.index(True))
-
-        if len(tmp_rs) > 0:
-            log.debug("failed because not zero")
-            for x in tmp_rs:
-                log.debug([x.mainsnak.property_number, x.mainsnak.datavalue, [z.mainsnak.datavalue for z in x.qualifiers]])
-            log.debug("failed because not zero--END")
-            return True
-
-        return False
-
-    def init_language_data(self, lang: str, lang_data_type: str) -> None:
-        """
-        Initialize language data store
-
-        :param lang: language code
-        :param lang_data_type: 'label', 'description' or 'aliases'
-        :return: None
-        """
-        if lang not in self.loaded_langs:
-            self.loaded_langs[lang] = {}
-
-        if lang_data_type not in self.loaded_langs[lang]:
-            result = self._query_lang(lang=lang, lang_data_type=lang_data_type)
-            if result is not None:
-                data = self._process_lang(result=result)
-                self.loaded_langs[lang].update({lang_data_type: data})
-
-    def get_language_data(self, qid: str, lang: str, lang_data_type: str) -> List[str]:
-        """
-        get language data for specified qid
-
-        :param qid:  Wikibase item id
-        :param lang: language code
-        :param lang_data_type: 'label', 'description' or 'aliases'
-        :return: list of strings
-        If nothing is found:
-            If lang_data_type == label: returns ['']
-            If lang_data_type == description: returns ['']
-            If lang_data_type == aliases: returns []
-        """
-        self.init_language_data(lang, lang_data_type)
-
-        current_lang_data = self.loaded_langs[lang][lang_data_type]
-        all_lang_strings = current_lang_data.get(qid, [])
-        if not all_lang_strings and lang_data_type in {'label', 'description'}:
-            all_lang_strings = ['']
-        return all_lang_strings
-
-    def check_language_data(self, qid: str, lang_data: List, lang: str, lang_data_type: str, action_if_exists: ActionIfExists = ActionIfExists.APPEND_OR_REPLACE) -> bool:
-        """
-        Method to check if certain language data exists as a label, description or aliases
-        :param qid: Wikibase item id
-        :param lang_data: list of string values to check
-        :param lang: language code
-        :param lang_data_type: What kind of data is it? 'label', 'description' or 'aliases'?
-        :param action_if_exists: If aliases already exist, APPEND_OR_REPLACE or REPLACE_ALL
-        :return: boolean
-        """
-        all_lang_strings = {x.strip().casefold() for x in self.get_language_data(qid, lang, lang_data_type)}
-
-        if action_if_exists == ActionIfExists.REPLACE_ALL:
-            return collections.Counter(all_lang_strings) != collections.Counter(map(lambda x: x.casefold(), lang_data))
-
-        for s in lang_data:
-            if s.strip().casefold() not in all_lang_strings:
-                log.debug("fastrun failed at: %s, string: %s", lang_data_type, s)
-                return True
-
-        return False
-
-    def get_all_data(self) -> Dict[str, Dict]:
-        return self.prop_data
-
-    def format_query_results(self, r: List, prop_nr: str) -> None:
-        """
-        `r` is the results of the sparql query in _query_data and is modified in place
-        `prop_nr` is needed to get the property datatype to determine how to format the value
-
-        `r` is a list of dicts. The keys are:
-            sid: statement ID
-            item: the subject. the item this statement is on
-            v: the object. The value for this statement
-            unit: property unit
-            pq: qualifier property
-            qval: qualifier value
-            qunit: qualifier unit
-            ref: reference ID
-            pr: reference property
-            rval: reference value
-        """
-        prop_dt = self.get_prop_datatype(prop_nr)
-        for i in r:
-            for value in ['item', 'sid', 'pq', 'pr', 'ref', 'unit', 'qunit']:
-                if value in i:
-                    if i[value]['value'].startswith(self.wikibase_url):
-                        i[value] = i[value]['value'].split('/')[-1]
+            # Generate base filter
+            base_filter_string = ''
+            for k in self.base_filter:
+                if isinstance(k, BaseDataType):
+                    if k.mainsnak.datavalue:
+                        base_filter_string += '?entity <{wb_url}/prop/direct/{prop_nr}> {entity} .\n'.format(
+                            wb_url=wb_url, prop_nr=k.mainsnak.property_number, entity=k.get_sparql_value(wikibase_url=wb_url))
+                    elif sum(map(lambda x, other=k: x.mainsnak.property_number == other.mainsnak.property_number, self.base_filter)) == 1:  # type: ignore
+                        base_filter_string += '?entity <{wb_url}/prop/direct/{prop_nr}> ?zz{prop_nr} .\n'.format(
+                            wb_url=wb_url, prop_nr=k.mainsnak.property_number)
+                elif isinstance(k, list) and len(k) == 2 and isinstance(k[0], BaseDataType) and isinstance(k[1], BaseDataType):
+                    if k[0].mainsnak.datavalue:
+                        base_filter_string += '?entity <{wb_url}/prop/direct/{prop_nr}>/<{wb_url}/prop/direct/{prop_nr2}>* {entity} .\n'.format(
+                            wb_url=wb_url, prop_nr=k[0].mainsnak.property_number, prop_nr2=k[1].mainsnak.property_number,
+                            entity=k[0].get_sparql_value(wikibase_url=wb_url))
+                    # TODO: Remove ?zzPYY if another filter have the same property number, the same as above
                     else:
-                        # TODO: Dirty fix. If we are not on wikidata, we force unitless (Q199) to '1'
-                        if i[value]['value'] == 'http://www.wikidata.org/entity/Q199':
-                            i[value] = '1'
-                        else:
-                            i[value] = i[value]['value']
-
-            # make sure datetimes are formatted correctly.
-            # the correct format is '+%Y-%m-%dT%H:%M:%SZ', but is sometimes missing the plus??
-            # some difference between RDF and xsd:dateTime that I don't understand
-            for value in ['v', 'qval', 'rval']:
-                if value in i:
-                    if i[value].get("datatype") == 'http://www.w3.org/2001/XMLSchema#dateTime' and not i[value]['value'][0] in '+-':
-                        # if it is a dateTime and doesn't start with plus or minus, add a plus
-                        i[value]['value'] = '+' + i[value]['value']
-
-            # these three ({'v', 'qval', 'rval'}) are values that can be any data type
-            # strip off the URI if they are wikibase-items
-            if 'v' in i:
-                if i['v']['type'] == 'uri' and prop_dt == 'wikibase-item':
-                    i['v'] = i['v']['value'].split('/')[-1]
-                elif i['v']['type'] == 'literal' and prop_dt == 'quantity':
-                    i['v'] = format_amount(i['v']['value'])
-                elif i['v']['type'] == 'literal' and prop_dt == 'monolingualtext':
-                    f = [x for x in self.base_data_type.subclasses if x.DTYPE == prop_dt][0](prop_nr=prop_nr, text=i['v']['value'], language=i['v']['xml:lang'])
-                    i['v'] = f.get_sparql_value()
+                        base_filter_string += '?entity <{wb_url}/prop/direct/{prop_nr1}>/<{wb_url}/prop/direct/{prop_nr2}>* ?zz{prop_nr1}{prop_nr2} .\n'.format(
+                            wb_url=wb_url, prop_nr1=k[0].mainsnak.property_number, prop_nr2=k[1].mainsnak.property_number)
                 else:
-                    f = [x for x in self.base_data_type.subclasses if x.DTYPE == prop_dt][0](prop_nr=prop_nr)
-                    if not f.parse_sparql_value(value=i['v']['value'], type=i['v']['type']):
-                        raise ValueError("Can't parse the value with parse_sparql_value()")
-                    i['v'] = f.get_sparql_value()
+                    raise ValueError("base_filter must be an instance of BaseDataType or a list of instances of BaseDataType")
 
-                # Note: no-value and some-value don't actually show up in the results here
-                # see for example: select * where { wd:Q7207 p:P40 ?c . ?c ?d ?e }
-                if not isinstance(i['v'], dict):
-                    self.rev_lookup[i['v']].add(i['item'])
+            qualifiers_filter_string = ''
+            if self.use_qualifiers:
+                for qualifier in claim.qualifiers:
+                    fake_json = {
+                        'mainsnak': qualifier.get_json(),
+                        'type': qualifier.datatype,
+                        'id': 'Q0',
+                        'rank': 'normal'
+                    }
+                    f = [x for x in self.base_data_type.subclasses if x.DTYPE == qualifier.datatype][0]().from_json(json_data=fake_json)
+                    qualifiers_filter_string += f'?sid pq:{qualifier.property_number} {f.get_sparql_value()}.\n'
+
+            # We force a refresh of the data, remove the previous results
+            self.data[prop_nr] = {}
+
+            while True:
+                query = '''
+                #Tool: WikibaseIntegrator wbi_fastrun.load_statements
+                SELECT ?entity ?sid ?value ?property_type WHERE {{
+                  # Base filter string
+                  {base_filter_string}
+                  ?entity <{wb_url}/prop/{prop_nr}> ?sid.
+                  <{wb_url}/entity/{prop_nr}> wikibase:propertyType ?property_type.
+                  ?sid <{wb_url}/prop/statement/{prop_nr}> ?value.
+                  {qualifiers_filter_string}
+                }}
+                ORDER BY ?sid
+                OFFSET {offset}
+                LIMIT {limit}
+                '''
+
+                # Format the query
+                query = query.format(base_filter_string=base_filter_string, wb_url=wb_url, prop_nr=prop_nr, offset=str(offset), limit=str(limit),
+                                     qualifiers_filter_string=qualifiers_filter_string)
+                offset += limit  # We increase the offset for the next iteration
+                results = execute_sparql_query(query=query, endpoint=self.sparql_endpoint_url)['results']['bindings']
+
+                for result in results:
+                    entity = result['entity']['value']
+                    sid = result['sid']['value']
+                    # value = result['value']['value']
+                    property_type = result['property_type']['value']
+
+                    # Use casefold for lower case
                     if self.case_insensitive:
-                        self.rev_lookup_ci[i['v'].casefold()].add(i['item'])
+                        result['value']['value'] = result['value']['value'].casefold()
 
-            # handle qualifier value
-            if 'qval' in i:
-                qual_prop_dt = self.get_prop_datatype(prop_nr=i['pq'])
-                if i['qval']['type'] == 'uri' and qual_prop_dt == 'wikibase-item':
-                    i['qval'] = i['qval']['value'].split('/')[-1]
-                elif i['qval']['type'] == 'literal' and qual_prop_dt == 'quantity':
-                    i['qval'] = format_amount(i['qval']['value'])
-                else:
-                    i['qval'] = i['qval']['value']
+                    f = [x for x in self.base_data_type.subclasses if x.PTYPE == property_type][0]().from_sparql_value(sparql_value=result['value'])
 
-            # handle reference value
-            if 'rval' in i:
-                ref_prop_dt = self.get_prop_datatype(prop_nr=i['pr'])
-                if i['rval']['type'] == 'uri' and ref_prop_dt == 'wikibase-item':
-                    i['rval'] = i['rval']['value'].split('/')[-1]
-                elif i['rval']['type'] == 'literal' and ref_prop_dt == 'quantity':
-                    i['rval'] = format_amount(i['rval']['value'])
-                else:
-                    i['rval'] = i['rval']['value']
+                    sparql_value = f.get_sparql_value()
+                    if sparql_value is not None:
+                        if sparql_value not in self.data[prop_nr]:
+                            self.data[prop_nr][sparql_value] = []
 
-    def update_frc_from_query(self, r: List, prop_nr: str) -> None:
-        # r is the output of format_query_results
-        # this updates the frc from the query (result of _query_data)
-        for i in r:
-            qid = i['item']
-            if qid not in self.prop_data:
-                self.prop_data[qid] = {prop_nr: {}}
-            if prop_nr not in self.prop_data[qid]:
-                self.prop_data[qid].update({prop_nr: {}})
-            if i['sid'] not in self.prop_data[qid][prop_nr]:
-                self.prop_data[qid][prop_nr].update({i['sid']: {}})
-            # update values for this statement (not including ref)
-            d = {'v': i['v']}
-            self.prop_data[qid][prop_nr][i['sid']].update(d)
+                        if prop_nr not in self.properties_type:
+                            self.properties_type[prop_nr] = property_type
 
-            if 'qual' not in self.prop_data[qid][prop_nr][i['sid']]:
-                self.prop_data[qid][prop_nr][i['sid']]['qual'] = set()
-            if 'pq' in i and 'qval' in i:
-                if 'qunit' in i:
-                    self.prop_data[qid][prop_nr][i['sid']]['qual'].add((i['pq'], i['qval'], i['qunit']))
-                else:
-                    self.prop_data[qid][prop_nr][i['sid']]['qual'].add((i['pq'], i['qval'], '1'))
+                        self.data[prop_nr][sparql_value].append({'entity': entity, 'sid': sid})
 
-            if 'ref' not in self.prop_data[qid][prop_nr][i['sid']]:
-                self.prop_data[qid][prop_nr][i['sid']]['ref'] = {}
-            if 'ref' in i:
-                if i['ref'] not in self.prop_data[qid][prop_nr][i['sid']]['ref']:
-                    self.prop_data[qid][prop_nr][i['sid']]['ref'][i['ref']] = set()
-                self.prop_data[qid][prop_nr][i['sid']]['ref'][i['ref']].add((i['pr'], i['rval']))
+                if len(results) == 0 or len(results) < limit:
+                    break
 
-            if 'unit' not in self.prop_data[qid][prop_nr][i['sid']]:
-                self.prop_data[qid][prop_nr][i['sid']]['unit'] = '1'
-            if 'unit' in i:
-                self.prop_data[qid][prop_nr][i['sid']]['unit'] = i['unit']
+    def _load_qualifiers(self, sid: str, limit: int = 10000) -> Qualifiers:
+        """
+        Load the qualifiers of a statement.
 
-    def _query_data(self, prop_nr: str, use_units: bool = False, page_size: int = 10000) -> None:
-        page_count = 0
+        :param sid: A statement ID.
+        :param limit: The limit to request at one time.
+        :return: A Qualifiers object.
+        """
+        offset = 0
 
+        # We force a refresh of the data, remove the previous results
+        qualifiers: Qualifiers = Qualifiers()
         while True:
-            # Query header
-            query = '''
-            #Tool: WikibaseIntegrator wbi_fastrun._query_data
-            SELECT ?sid ?item ?v ?unit ?pq ?qval ?qunit ?ref ?pr ?rval
-            WHERE
-            {{
-            '''
-
-            # Base filter
-            query += '''
-            {base_filter}
-
-            ?item <{wb_url}/prop/{prop_nr}> ?sid .
-            '''
-
-            # Amount and unit
-            if use_units:
-                query += '''
-                {{
-                  <{wb_url}/entity/{prop_nr}> wikibase:propertyType ?property_type .
-                  FILTER (?property_type != wikibase:Quantity)
-                  ?sid <{wb_url}/prop/statement/{prop_nr}> ?v .
-                }}
-                # Get amount and unit for the statement
-                UNION
-                {{
-                  ?sid <{wb_url}/prop/statement/value/{prop_nr}> [wikibase:quantityAmount ?v; wikibase:quantityUnit ?unit] .
-                }}
-                '''
-            else:
-                query += '''
-                <{wb_url}/entity/{prop_nr}> wikibase:propertyType ?property_type .
-                ?sid <{wb_url}/prop/statement/{prop_nr}> ?v .
-                '''
-
-            # Qualifiers
-            # Amount and unit
-            if use_units:
-                query += '''
-                # Get qualifiers
-                OPTIONAL
-                {{
-                  {{
-                    # Get simple values for qualifiers which are not of type quantity
-                    ?sid ?propQualifier ?qval .
-                    ?pq wikibase:qualifier ?propQualifier .
-                    ?pq wikibase:propertyType ?qualifer_property_type .
-                    FILTER (?qualifer_property_type != wikibase:Quantity)
-                  }}
-                  UNION
-                  {{
-                    # Get amount and unit for qualifiers of type quantity
-                    ?sid ?pqv [wikibase:quantityAmount ?qval; wikibase:quantityUnit ?qunit] .
-                    ?pq wikibase:qualifierValue ?pqv .
-                  }}
-                }}
-                '''
-            else:
-                query += '''
-                # Get qualifiers
-                OPTIONAL
-                {{
-                  # Get simple values for qualifiers
-                  ?sid ?propQualifier ?qval .
-                  ?pq wikibase:qualifier ?propQualifier .
-                  ?pq wikibase:propertyType ?qualifer_property_type .
-                }}
-                '''
-
-            # References
-            if self.use_refs:
-                query += '''
-                # get references
-                OPTIONAL {{
-                  ?sid prov:wasDerivedFrom ?ref .
-                  ?ref ?pr ?rval .
-                  [] wikibase:reference ?pr
-                }}
-                '''
-            # Query footer
-            query += '''
-            }} ORDER BY ?sid OFFSET {offset} LIMIT {page_size}
+            query = f'''
+            #Tool: WikibaseIntegrator wbi_fastrun._load_qualifiers
+            SELECT ?property ?value ?property_type WHERE {{
+              VALUES ?sid {{ <{sid}> }}
+              ?sid ?predicate ?value.
+              ?property wikibase:qualifier ?predicate.
+              ?property wikibase:propertyType ?property_type.
+            }}
+            ORDER BY ?sid
+            OFFSET {offset}
+            LIMIT {limit}
             '''
 
             # Format the query
-            query = query.format(wb_url=self.wikibase_url, base_filter=self.base_filter_string, prop_nr=prop_nr, offset=str(page_count * page_size), page_size=str(page_size))
-
+            # query = query.format(wb_url=wb_url, sid=sid, offset=str(offset), limit=str(limit))
+            offset += limit  # We increase the offset for the next iteration
             results = execute_sparql_query(query=query, endpoint=self.sparql_endpoint_url)['results']['bindings']
-            self.format_query_results(results, prop_nr)
-            self.update_frc_from_query(results, prop_nr)
-            page_count += 1
 
-            if len(results) == 0 or len(results) < page_size:
+            for result in results:
+                property = result['property']['value']
+                property_type = result['property_type']['value']
+
+                if property not in self.properties_type:
+                    self.properties_type[property] = property_type
+
+                # Use casefold for lower case
+                if self.case_insensitive:
+                    result['value']['value'] = result['value']['value'].casefold()
+
+                f = [x for x in self.base_data_type.subclasses if x.PTYPE == property_type][0](prop_nr=property).from_sparql_value(sparql_value=result['value'])
+                qualifiers.add(f)
+
+            if len(results) == 0 or len(results) < limit:
                 break
 
-    def _query_lang(self, lang: str, lang_data_type: str) -> Optional[List[Dict[str, Dict]]]:
+        return qualifiers
+
+    def _load_references(self, sid: str, limit: int = 10000) -> References:
         """
+        Load the references of a statement.
 
-        :param lang:
-        :param lang_data_type:
+        :param sid: A statement ID.
+        :param limit: The limit to request at one time.
+        :return: A References object.
         """
+        offset = 0
 
-        lang_data_type_dict = {
-            'label': 'rdfs:label',
-            'description': 'schema:description',
-            'aliases': 'skos:altLabel'
-        }
+        if not isinstance(sid, str):
+            raise ValueError('sid must be a string')
 
-        query = f'''
-        #Tool: WikibaseIntegrator wbi_fastrun._query_lang
-        SELECT ?item ?label WHERE {{
-            {self.base_filter_string}
+        # We force a refresh of the data, remove the previous results
+        references: References = References()
+        while True:
+            query = f'''
+            #Tool: WikibaseIntegrator wbi_fastrun._load_references
+            SELECT ?srid ?ref_property ?ref_value ?property_type WHERE {{
+              VALUES ?sid {{ <{sid}> }}
 
-            OPTIONAL {{
-                ?item {lang_data_type_dict[lang_data_type]} ?label FILTER (lang(?label) = "{lang}") .
+              ?sid prov:wasDerivedFrom ?srid.
+              ?srid ?ref_predicate ?ref_value.
+              ?ref_property wikibase:reference ?ref_predicate.
+              ?ref_property wikibase:propertyType ?property_type.
             }}
-        }}
-        '''
+            ORDER BY ?srid
+            OFFSET {offset}
+            LIMIT {limit}
+            '''
 
-        log.debug(query)
+            # Format the query
+            # query = query.format(wb_url=wb_url, sid=sid, offset=str(offset), limit=str(limit))
+            offset += limit  # We increase the offset for the next iteration
+            results = execute_sparql_query(query=query, endpoint=self.sparql_endpoint_url)['results']['bindings']
 
-        return execute_sparql_query(query=query, endpoint=self.sparql_endpoint_url)['results']['bindings']
+            reference = {}
 
-    @staticmethod
-    def _process_lang(result: List) -> defaultdict[str, set]:
-        data = defaultdict(set)
-        for r in result:
-            qid = r['item']['value'].split("/")[-1]
-            if 'label' in r:
-                data[qid].add(r['label']['value'])
-        return data
+            for result in results:
+                ref_property = result['ref_property']['value']
+                srid = result['srid']['value']
+                property_type = result['property_type']['value']
 
-    @lru_cache(maxsize=100000)
-    def get_prop_datatype(self, prop_nr: str) -> Optional[str]:  # pylint: disable=no-self-use
-        from wikibaseintegrator import WikibaseIntegrator
-        wbi = WikibaseIntegrator()
-        property = wbi.property.get(prop_nr)
-        datatype = property.datatype
-        if isinstance(datatype, WikibaseDatatype):
-            return datatype.value
-        return datatype
+                if ref_property not in self.properties_type:
+                    self.properties_type[ref_property] = property_type
 
-    def clear(self) -> None:
+                # Use casefold for lower case
+                if self.case_insensitive:
+                    result['value']['value'] = result['value']['value'].casefold()
+
+                f = [x for x in self.base_data_type.subclasses if x.PTYPE == property_type][0](prop_nr=ref_property).from_sparql_value(sparql_value=result['ref_value'])
+
+                if srid not in reference:
+                    reference[srid] = Reference()
+
+                reference[srid].add(f)
+
+            # Add each Reference to the References
+            for _, ref in reference.items():
+                references.add(ref)
+
+            if len(results) == 0 or len(results) < limit:
+                break
+
+        return references
+
+    def _get_property_type(self, prop_nr: Union[str, int]) -> str:
         """
-        convenience function to empty this fastrun container
+        Obtain the property type of the given property by looking at the SPARQL endpoint.
+
+        :param prop_nr: The property number.
+        :return: The SPARQL version of the property type.
         """
-        self.prop_dt_map = {}
-        self.prop_data = {}
-        self.rev_lookup = defaultdict(set)
-        self.rev_lookup_ci = defaultdict(set)
+        if isinstance(prop_nr, int):
+            prop_nr = 'P' + str(prop_nr)
+        elif prop_nr is not None:
+            pattern = re.compile(r'^P?([0-9]+)$')
+            matches = pattern.match(prop_nr)
 
-    def __repr__(self) -> str:
-        """A mixin implementing a simple __repr__."""
-        return "<{klass} @{id:x} {attrs}>".format(  # pylint: disable=consider-using-f-string
-            klass=self.__class__.__name__,
-            id=id(self) & 0xFFFFFF,
-            attrs="\r\n\t ".join(f"{k}={v!r}" for k, v in self.__dict__.items()),
-        )
+            if not matches:
+                raise ValueError('Invalid prop_nr, format must be "P[0-9]+"')
+
+            prop_nr = 'P' + str(matches.group(1))
+
+        query = f'''#Tool: WikibaseIntegrator wbi_fastrun._get_property_type
+        SELECT ?property_type WHERE {{ wd:{prop_nr} wikibase:propertyType ?property_type. }}'''
+
+        results = execute_sparql_query(query=query, endpoint=self.sparql_endpoint_url)['results']['bindings'][0]['property_type']['value']
+
+        return results
+
+    def get_entities(self, claims: Union[List[Claim], Claims, Claim], use_cache: Optional[bool] = None) -> List[str]:
+        """
+        Return a list of entities who correspond to the specified claims.
+
+        :param claims: A list of claims to query the SPARQL endpoint.
+        :param use_cache: Put data returned by WDQS in cache. Enabled by default.
+        :return: A list of entity ID.
+        """
+        if isinstance(claims, Claim):
+            claims = [claims]
+        elif (not isinstance(claims, list) or not all(isinstance(n, Claim) for n in claims)) and not isinstance(claims, Claims):
+            raise ValueError("claims must be an instance of Claim or Claims or a list of Claim")
+
+        self.load_statements(claims=claims, use_cache=use_cache)
+
+        result = set()
+        for claim in claims:
+            # Add the returned entities to the result list
+            for dat in self.data[claim.mainsnak.property_number]:
+                for rez in self.data[claim.mainsnak.property_number][dat]:
+                    result.add(rez['entity'].rsplit('/', 1)[-1])
+
+        return list(result)
+
+    def write_required(self, entity: BaseEntity, property_filter: Union[List[str], str, None] = None, use_qualifiers: Optional[bool] = None, use_references: Optional[bool] = None,
+                       use_cache: Optional[bool] = None) -> bool:
+        """
+
+        :param entity:
+        :param property_filter:
+        :param use_qualifiers: Use qualifiers during fastrun. Enabled by default.
+        :param use_references: Use references during fastrun. Disabled by default.
+        :param use_cache: Put data returned by WDQS in cache. Enabled by default.
+        :return: a boolean True if a write is required. False otherwise.
+        """
+        from wikibaseintegrator.entities import BaseEntity
+
+        if not isinstance(entity, BaseEntity):
+            raise ValueError("entity must be an instance of BaseEntity")
+
+        if len(entity.claims) == 0:
+            raise ValueError("entity must have at least one claim")
+
+        if property_filter is not None and isinstance(property_filter, str):
+            property_filter = [property_filter]
+
+        # Generate a property_filter if None is given
+        if property_filter is None:
+            property_filter = [claim.mainsnak.property_number for claim in entity.claims]
+
+        use_qualifiers = bool(use_qualifiers or self.use_qualifiers)
+        use_references = bool(use_references or self.use_references)
+
+        def contains(in_list, lambda_filter):
+            for x in in_list:
+                if lambda_filter(x):
+                    return True
+            return False
+
+        # Get all the potential statements
+        statements_to_check: Dict[str, List[str]] = {}
+        for claim in entity.claims:
+            if claim.mainsnak.property_number in property_filter:
+                self.load_statements(claims=claim, use_cache=use_cache)
+                if claim.mainsnak.property_number in self.data:
+                    if not contains(self.data[claim.mainsnak.property_number], (lambda x, c=claim: x == c.get_sparql_value())):
+                        # Found if a property with this value does not exist, return True if none exist
+                        logging.debug("Value '%s' does not exist for property '%s'", claim.get_sparql_value(), claim.mainsnak.property_number)
+                        return True
+
+                    for statement in self.data[claim.mainsnak.property_number][claim.get_sparql_value()]:
+                        if claim.mainsnak.property_number not in statements_to_check:
+                            statements_to_check[claim.mainsnak.property_number] = []
+                        statements_to_check[claim.mainsnak.property_number].append(statement['entity'])
+
+        # Generate an intersection between all the statements by property, based on the entity
+        # Generate only the list of entities
+        list_entities: List[List[str]] = []
+        for _, statements in statements_to_check.items():
+            # entities = [statement['entity'] for statement in statements_to_check[property]]
+            list_entities.append(list(set(statements)))
+
+        # Return the intersection between all the list
+        common_entities: List = list_entities.pop()
+        for entities in list_entities:
+            common_entities = list(set(common_entities).intersection(entities))
+
+        # If the property is already found, load it completely to compare deeply
+        for claim in entity.claims:
+            if claim.mainsnak.property_number in property_filter:
+                sparql_value: str = claim.get_sparql_value()
+                if claim.mainsnak.property_number in self.data and sparql_value in self.data[claim.mainsnak.property_number]:
+                    for statement in self.data[claim.mainsnak.property_number][sparql_value]:
+                        if statement['entity'] in common_entities:
+                            if use_qualifiers:
+                                qualifiers = self._load_qualifiers(statement['sid'], limit=100)
+
+                                if len(qualifiers) != len(claim.qualifiers):
+                                    logging.debug("Difference in number of qualifiers, '%i' != '%i'", len(qualifiers), len(claim.qualifiers))
+                                    return True
+
+                                for qualifier in qualifiers:
+                                    if qualifier not in claim.qualifiers:
+                                        logging.debug("Difference between two qualifiers")
+                                        return True
+
+                            if use_references:
+                                references = self._load_references(statement['sid'], limit=100)
+
+                                if len(references) != len(claim.references):
+                                    logging.debug("Difference in number of references, '%i' != '%i'", len(references), len(claim.references))
+                                    return True
+
+                                for reference in references:
+                                    if reference not in claim.references:
+                                        logging.debug("Difference between two references")
+                                        return True
+
+        return False
 
 
-def get_fastrun_container(base_filter: Optional[List[BaseDataType | List[BaseDataType]]] = None, use_refs: bool = False, case_insensitive: bool = False) -> FastRunContainer:
+def get_fastrun_container(base_filter: List[BaseDataType | List[BaseDataType]], use_qualifiers: bool = True, use_references: bool = False, use_cache: bool = True,
+                          case_insensitive: bool = False) -> FastRunContainer:
+    """
+    Return a FastRunContainer object, create a new one if it doesn't already exist.
+
+    :param base_filter: The default filter to initialize the dataset. A list made of BaseDataType or list of BaseDataType.
+    :param use_qualifiers: Use qualifiers during fastrun. Enabled by default.
+    :param use_references: Use references during fastrun. Disabled by default.
+    :param use_cache: Put data returned by WDQS in cache. Enabled by default.
+    :param case_insensitive:
+    :return: a FastRunContainer object
+    """
     if base_filter is None:
         base_filter = []
 
     # We search if we already have a FastRunContainer with the same parameters to re-use it
-    fastrun_container = _search_fastrun_store(base_filter=base_filter, use_refs=use_refs, case_insensitive=case_insensitive)
+    fastrun_container = _search_fastrun_store(base_filter=base_filter, use_qualifiers=use_qualifiers, use_references=use_references, case_insensitive=case_insensitive,
+                                              use_cache=use_cache)
 
     return fastrun_container
 
 
-def _search_fastrun_store(base_filter: Optional[List[BaseDataType | List[BaseDataType]]] = None, use_refs: bool = False, case_insensitive: bool = False) -> FastRunContainer:
+def _search_fastrun_store(base_filter: List[BaseDataType | List[BaseDataType]], use_qualifiers: bool = True, use_references: bool = False, use_cache: bool = True,
+                          case_insensitive: bool = False) -> FastRunContainer:
+    """
+    Search for an existing FastRunContainer with the same parameters or create a new one if it doesn't exist.
+
+    :param base_filter: The default filter to initialize the dataset. A list made of BaseDataType or list of BaseDataType.
+    :param use_qualifiers: Use qualifiers during fastrun. Enabled by default.
+    :param use_references: Use references during fastrun. Disabled by default.
+    :param use_cache: Put data returned by WDQS in cache. Enabled by default.
+    :param case_insensitive:
+    :return: a FastRunContainer object
+    """
     for fastrun in fastrun_store:
-        if (fastrun.base_filter == base_filter) and (fastrun.use_refs == use_refs) and (fastrun.case_insensitive == case_insensitive) and (
-                fastrun.sparql_endpoint_url == config['SPARQL_ENDPOINT_URL']):
+        if (fastrun.base_filter == base_filter) and (fastrun.use_qualifiers == use_qualifiers) and (fastrun.use_references == use_references) and (
+                fastrun.case_insensitive == case_insensitive) and (fastrun.sparql_endpoint_url == config['SPARQL_ENDPOINT_URL']):
+            fastrun.use_cache = use_cache
             return fastrun
 
     # In case nothing was found in the fastrun_store
     log.info("Create a new FastRunContainer")
 
-    fastrun_container = FastRunContainer(base_data_type=BaseDataType, base_filter=base_filter, use_refs=use_refs, case_insensitive=case_insensitive)
+    fastrun_container = FastRunContainer(base_data_type=BaseDataType, base_filter=base_filter, use_qualifiers=use_qualifiers, use_references=use_references, use_cache=use_cache,
+                                         case_insensitive=case_insensitive)
     fastrun_store.append(fastrun_container)
     return fastrun_container
