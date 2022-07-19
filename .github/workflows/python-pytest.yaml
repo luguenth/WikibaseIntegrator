@@ -21,7 +21,7 @@ on:
       - 'pyproject.toml'
 
 jobs:
-  build:
+  pytest:
     name: pytest ${{ matrix.python-version }}/${{ matrix.mediawiki-version }}
     runs-on: ubuntu-latest
 
@@ -32,6 +32,10 @@ jobs:
 
     steps:
       - uses: actions/checkout@v3.5.3
+
+      - uses: KengoTODA/actions-setup-docker-compose@main
+        with:
+          version: '1.29.2'
 
       - name: Set up Docker containers with v${{ matrix.mediawiki-version }}
         run: |
