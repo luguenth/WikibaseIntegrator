@@ -327,8 +327,8 @@ class FastRunContainer:
         result = set()
         for claim in claims:
             # Add the returned entities to the result list
-            for dat in self.data[claim.mainsnak.property_number]:
-                for rez in self.data[claim.mainsnak.property_number][dat]:
+            if claim.get_sparql_value() in self.data[claim.mainsnak.property_number]:
+                for rez in self.data[claim.mainsnak.property_number][claim.get_sparql_value()]:  # type: ignore
                     result.add(rez['entity'].rsplit('/', 1)[-1])
 
         return list(result)
