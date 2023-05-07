@@ -56,7 +56,7 @@ class FastRunContainer:
         if self.case_insensitive:
             raise ValueError("Case insensitive does not work for the moment.")
 
-    def load_statements(self, claims: Union[List[Claim], Claims, Claim], use_cache: Optional[bool] = None, wb_url: Optional[str] = None, limit: int = 10000) -> None:
+    def load_statements(self, claims: Union[List[Claim], Claims, Claim], use_cache: Optional[bool] = None, wb_url: Optional[str] = None, limit: Optional[int] = None) -> None:
         """
         Load the statements related to the given claims into the internal cache of the current object.
 
@@ -74,6 +74,8 @@ class FastRunContainer:
         use_cache = bool(use_cache or self.use_cache)
 
         wb_url = wb_url or self.wikibase_url
+
+        limit = limit or int(config['SPARQL_QUERY_LIMIT'])  # type: ignore
 
         for claim in claims:
             prop_nr = claim.mainsnak.property_number
@@ -168,7 +170,7 @@ class FastRunContainer:
                 if len(results) == 0 or len(results) < limit:
                     break
 
-    def _load_qualifiers(self, sid: str, limit: int = 10000) -> Qualifiers:
+    def _load_qualifiers(self, sid: str, limit: Optional[int] = None) -> Qualifiers:
         """
         Load the qualifiers of a statement.
 
@@ -177,6 +179,8 @@ class FastRunContainer:
         :return: A Qualifiers object.
         """
         offset = 0
+
+        limit = limit or int(config['SPARQL_QUERY_LIMIT'])  # type: ignore
 
         # We force a refresh of the data, remove the previous results
         qualifiers: Qualifiers = Qualifiers()
@@ -309,12 +313,13 @@ class FastRunContainer:
 
         return results
 
-    def get_entities(self, claims: Union[List[Claim], Claims, Claim], use_cache: Optional[bool] = None) -> List[str]:
+    def get_entities(self, claims: Union[List[Claim], Claims, Claim], use_cache: Optional[bool] = None, query_limit: Optional[int] = None) -> List[str]:
         """
         Return a list of entities who correspond to the specified claims.
 
         :param claims: A list of claims to query the SPARQL endpoint.
         :param use_cache: Put data returned by WDQS in cache. Enabled by default.
+        :param query_limit: Limit the amount of results from the SPARQL server
         :return: A list of entity ID.
         """
         if isinstance(claims, Claim):
@@ -322,7 +327,7 @@ class FastRunContainer:
         elif (not isinstance(claims, list) or not all(isinstance(n, Claim) for n in claims)) and not isinstance(claims, Claims):
             raise ValueError("claims must be an instance of Claim or Claims or a list of Claim")
 
-        self.load_statements(claims=claims, use_cache=use_cache)
+        self.load_statements(claims=claims, use_cache=use_cache, limit=query_limit)
 
         result = set()
         for claim in claims:
@@ -334,7 +339,7 @@ class FastRunContainer:
         return list(result)
 
     def write_required(self, entity: BaseEntity, property_filter: Union[List[str], str, None] = None, use_qualifiers: Optional[bool] = None, use_references: Optional[bool] = None,
-                       use_cache: Optional[bool] = None) -> bool:
+                       use_cache: Optional[bool] = None, query_limit: Optional[int] = None) -> bool:
         """
 
         :param entity:
@@ -342,6 +347,7 @@ class FastRunContainer:
         :param use_qualifiers: Use qualifiers during fastrun. Enabled by default.
         :param use_references: Use references during fastrun. Disabled by default.
         :param use_cache: Put data returned by WDQS in cache. Enabled by default.
+        :param query_limit: Limit the amount of results from the SPARQL server
         :return: a boolean True if a write is required. False otherwise.
         """
         from wikibaseintegrator.entities import BaseEntity
@@ -372,7 +378,7 @@ class FastRunContainer:
         statements_to_check: Dict[str, List[str]] = {}
         for claim in entity.claims:
             if claim.mainsnak.property_number in property_filter:
-                self.load_statements(claims=claim, use_cache=use_cache)
+                self.load_statements(claims=claim, use_cache=use_cache, limit=query_limit)
                 if claim.mainsnak.property_number in self.data:
                     if not contains(self.data[claim.mainsnak.property_number], (lambda x, c=claim: x == c.get_sparql_value())):
                         # Found if a property with this value does not exist, return True if none exist
