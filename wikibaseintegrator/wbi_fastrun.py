@@ -394,9 +394,10 @@ class FastRunContainer:
                 self.load_statements(claims=claim, use_cache=use_cache, limit=query_limit)
                 if claim.mainsnak.property_number in self.data:
                     if not contains(self.data[claim.mainsnak.property_number], (lambda x, c=claim: x == c.get_sparql_value())):
-                        # Found if a property with this value does not exist, return True if none exist
+                        # Checks if a property with this value does not exist, return True if none exist
                         logging.debug("Value '%s' does not exist for property '%s'", claim.get_sparql_value(), claim.mainsnak.property_number)
                         return True
+                        # TODO: Doesn't work in the value already exists in another entity
 
                     for statement in self.data[claim.mainsnak.property_number][claim.get_sparql_value()]:
                         if claim.mainsnak.property_number not in statements_to_check:
@@ -414,6 +415,10 @@ class FastRunContainer:
         common_entities: List = list_entities.pop()
         for entities in list_entities:
             common_entities = list(set(common_entities).intersection(entities))
+
+        # If there is none common entities, return True because we need a write
+        if not common_entities:
+            return True
 
         # If the property is already found, load it completely to compare deeply
         for claim in entity.claims:
@@ -445,6 +450,8 @@ class FastRunContainer:
                                     if reference not in claim.references:
                                         logging.debug("Difference between two references")
                                         return True
+
+                            # TODO: Add use_rank to compare rank ?
 
         return False
 
