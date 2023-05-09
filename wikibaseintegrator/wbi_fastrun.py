@@ -329,14 +329,27 @@ class FastRunContainer:
 
         self.load_statements(claims=claims, use_cache=use_cache, limit=query_limit)
 
-        result = set()
-        for claim in claims:
-            # Add the returned entities to the result list
-            if claim.get_sparql_value() in self.data[claim.mainsnak.property_number]:
-                for rez in self.data[claim.mainsnak.property_number][claim.get_sparql_value()]:  # type: ignore
-                    result.add(rez['entity'].rsplit('/', 1)[-1])
+        result = []
+        for base_filter in self.base_filter:
+            sub_result = set()
+            if isinstance(base_filter, BaseDataType):  # TODO: Manage case where filter is a list of BaseDataType
+                if not base_filter.mainsnak.datavalue:
+                    for claim in claims:
+                        if base_filter.mainsnak.property_number == claim.mainsnak.property_number:
+                            # Add the returned entities to the result list
+                            if claim.get_sparql_value() in self.data[claim.mainsnak.property_number]:
+                                for rez in self.data[claim.mainsnak.property_number][claim.get_sparql_value()]:  # type: ignore
+                                    sub_result.add(rez['entity'].rsplit('/', 1)[-1])
+                else:
+                    if base_filter.mainsnak.property_number in self.data:
+                        if base_filter.get_sparql_value() in self.data[base_filter.mainsnak.property_number]:
+                            for rez in self.data[base_filter.mainsnak.property_number][base_filter.get_sparql_value()]:  # type: ignore
+                                sub_result.add(rez['entity'].rsplit('/', 1)[-1])
+                    else:
+                        continue
+            result.append(sub_result)
 
-        return list(result)
+        return list(set.intersection(*map(set, result)))
 
     def write_required(self, entity: BaseEntity, property_filter: Union[List[str], str, None] = None, use_qualifiers: Optional[bool] = None, use_references: Optional[bool] = None,
                        use_cache: Optional[bool] = None, query_limit: Optional[int] = None) -> bool:
