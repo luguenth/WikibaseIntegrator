@@ -371,7 +371,12 @@ class FastRunContainer:
                         continue
             result.append(sub_result)
 
-        return list(set.intersection(*map(set, result)))
+        if result:
+            if len(result) > 1:
+                return list(set(result[0]).intersection(*result[1:]))
+            return list(result[0])
+        else:
+            return []
 
     def write_required(self, entity: BaseEntity, property_filter: Union[List[str], str, None] = None, use_qualifiers: Optional[bool] = None, use_references: Optional[bool] = None,
                        use_cache: Optional[bool] = None, query_limit: Optional[int] = None) -> bool:
