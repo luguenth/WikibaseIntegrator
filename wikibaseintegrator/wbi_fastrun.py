@@ -2,15 +2,12 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import TYPE_CHECKING, Dict, List, Optional, Type, Union
+from typing import Dict, List, Optional, Type, Union
 
 from wikibaseintegrator.datatypes import BaseDataType
 from wikibaseintegrator.models import Claim, Claims, Qualifiers, Reference, References
 from wikibaseintegrator.wbi_config import config
 from wikibaseintegrator.wbi_helpers import execute_sparql_query
-
-if TYPE_CHECKING:
-    from wikibaseintegrator.entities import BaseEntity
 
 log = logging.getLogger(__name__)
 
@@ -378,32 +375,37 @@ class FastRunContainer:
         else:
             return []
 
-    def write_required(self, entity: BaseEntity, property_filter: Union[List[str], str, None] = None, use_qualifiers: Optional[bool] = None, use_references: Optional[bool] = None,
-                       cache: Optional[bool] = None, query_limit: Optional[int] = None) -> bool:
+    def write_required(self, claims: Union[List[Claim], Claims, Claim], entity_filter: Union[List[str], str, None] = None, property_filter: Union[List[str], str, None] = None, use_qualifiers: Optional[bool] = None,
+                       use_references: Optional[bool] = None, cache: Optional[bool] = None, query_limit: Optional[int] = None) -> bool:
         """
 
-        :param entity:
-        :param property_filter:
+        :param claims:
+        :param entity_filter: Allows you to filter the entities checked. This can be a single entity or a list of entities.
+        :param property_filter: Allows you to limit the difference comparison to a list of properties
         :param use_qualifiers: Use qualifiers during fastrun. Enabled by default.
         :param use_references: Use references during fastrun. Disabled by default.
         :param cache: Put data returned by WDQS in cache. Enabled by default.
         :param query_limit: Limit the amount of results from the SPARQL server
         :return: a boolean True if a write is required. False otherwise.
         """
-        from wikibaseintegrator.entities import BaseEntity
 
-        if not isinstance(entity, BaseEntity):
-            raise ValueError("entity must be an instance of BaseEntity")
+        if isinstance(claims, Claim):
+            claims = [claims]
+        elif (not isinstance(claims, list) or not all(isinstance(n, Claim) for n in claims)) and not isinstance(claims, Claims):
+            raise ValueError("claims must be an instance of Claim or Claims or a list of Claim")
 
-        if len(entity.claims) == 0:
-            raise ValueError("entity must have at least one claim")
+        if len(claims) == 0:
+            raise ValueError("claims must have at least one claim")
+
+        if entity_filter is not None and isinstance(entity_filter, str):
+            entity_filter = [entity_filter]
 
         if property_filter is not None and isinstance(property_filter, str):
             property_filter = [property_filter]
 
         # Generate a property_filter if None is given
         if property_filter is None:
-            property_filter = [claim.mainsnak.property_number for claim in entity.claims]
+            property_filter = [claim.mainsnak.property_number for claim in claims]
 
         use_qualifiers = bool(use_qualifiers or self.use_qualifiers)
         use_references = bool(use_references or self.use_references)
@@ -416,7 +418,7 @@ class FastRunContainer:
 
         # Get all the potential statements
         statements_to_check: Dict[str, List[str]] = {}
-        for claim in entity.claims:
+        for claim in claims:
             if claim.mainsnak.property_number in property_filter:
                 self.load_statements(claims=claim, cache=cache, limit=query_limit)
                 if claim.mainsnak.property_number in self.data:
@@ -426,10 +428,12 @@ class FastRunContainer:
                         return True
                         # TODO: Doesn't work in the value already exists in another entity
 
-                    for statement in self.data[claim.mainsnak.property_number][claim.get_sparql_value()]:
-                        if claim.mainsnak.property_number not in statements_to_check:
-                            statements_to_check[claim.mainsnak.property_number] = []
-                        statements_to_check[claim.mainsnak.property_number].append(statement['entity'])
+                    sparql_value = claim.get_sparql_value()
+                    if sparql_value:
+                        for statement in self.data[claim.mainsnak.property_number][sparql_value]:
+                            if claim.mainsnak.property_number not in statements_to_check:
+                                statements_to_check[claim.mainsnak.property_number] = []
+                            statements_to_check[claim.mainsnak.property_number].append(statement['entity'])
 
         # Generate an intersection between all the statements by property, based on the entity
         # Generate only the list of entities
@@ -449,11 +453,13 @@ class FastRunContainer:
             return True
 
         # If the property is already found, load it completely to compare deeply
-        for claim in entity.claims:
+        for claim in claims:
             if claim.mainsnak.property_number in property_filter:
-                sparql_value: str = claim.get_sparql_value()
-                if claim.mainsnak.property_number in self.data and sparql_value in self.data[claim.mainsnak.property_number]:
+                sparql_value = claim.get_sparql_value()
+                if sparql_value and claim.mainsnak.property_number in self.data and sparql_value in self.data[claim.mainsnak.property_number]:
                     for statement in self.data[claim.mainsnak.property_number][sparql_value]:
+                        if entity_filter and statement['entity'].rsplit('/', 1)[-1] not in entity_filter:
+                            continue
                         if statement['entity'] in common_entities:
                             if use_qualifiers:
                                 qualifiers = self._load_qualifiers(statement['sid'], limit=100)

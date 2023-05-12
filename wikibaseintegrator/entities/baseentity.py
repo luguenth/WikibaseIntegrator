@@ -307,7 +307,7 @@ class BaseEntity:
 
         # TODO: Add check_language_data
 
-        return fastrun_container.write_required(entity=self, property_filter=property_filter)
+        return fastrun_container.write_required(claims=self.claims, property_filter=property_filter)
 
     def get_entity_url(self, wikibase_url: Optional[str] = None) -> str:
         from wikibaseintegrator.wbi_config import config

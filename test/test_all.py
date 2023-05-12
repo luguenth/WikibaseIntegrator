@@ -4,7 +4,7 @@ import unittest
 
 from wikibaseintegrator import WikibaseIntegrator, datatypes, wbi_fastrun
 from wikibaseintegrator.datatypes import BaseDataType, Item
-from wikibaseintegrator.entities import BaseEntity, ItemEntity
+from wikibaseintegrator.entities import ItemEntity
 from wikibaseintegrator.wbi_config import config as wbi_config
 from wikibaseintegrator.wbi_enums import WikibaseDatatype
 
@@ -63,9 +63,7 @@ class TestFastRun(unittest.TestCase):
 
         frc = wbi_fastrun.FastRunContainer(base_filter=[BaseDataType(prop_nr='P352'), datatypes.Item(prop_nr='P703', value='Q27510868')], base_data_type=datatypes.BaseDataType)
 
-        entity = BaseEntity().add_claims(statements)
-
-        fastrun_result = frc.write_required(entity=entity)
+        fastrun_result = frc.write_required(claims=statements)
 
         # here, fastrun should succeed, if not, test failed
         if not fastrun_result:
