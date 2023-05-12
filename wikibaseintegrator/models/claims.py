@@ -374,5 +374,5 @@ class Claim(BaseModel):
         return len(oldrefs) == len(newrefs) and all(any(ref_equal(oldref, newref) for oldref in oldrefs) for newref in newrefs)
 
     @abstractmethod
-    def get_sparql_value(self) -> Optional[str]:
+    def get_sparql_value(self, **kwargs: Any) -> Optional[str]:
         pass
