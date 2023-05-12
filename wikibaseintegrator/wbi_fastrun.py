@@ -24,7 +24,7 @@ class FastRunContainer:
     :param base_data_type: The default data type to create objects.
     :param use_qualifiers: Use qualifiers during fastrun. Enabled by default.
     :param use_references: Use references during fastrun. Disabled by default.
-    :param use_cache: Put data returned by WDQS in cache. Enabled by default.
+    :param cache: Put data returned by WDQS in cache. Enabled by default.
     :param case_insensitive: <not used at this moment>
     :param sparql_endpoint_url: SPARLQ endpoint URL.
     :param wikibase_url: Wikibase URL used for the concept URI.
@@ -35,7 +35,7 @@ class FastRunContainer:
     data: Dict[str, Dict[str, List[Dict[str, str]]]]
 
     def __init__(self, base_filter: List[BaseDataType | List[BaseDataType]], base_data_type: Optional[Type[BaseDataType]] = None, use_qualifiers: bool = True, use_references: bool = False,
-                 use_cache: bool = True, case_insensitive: bool = False, sparql_endpoint_url: Optional[str] = None, wikibase_url: Optional[str] = None):
+                 cache: bool = True, case_insensitive: bool = False, sparql_endpoint_url: Optional[str] = None, wikibase_url: Optional[str] = None):
 
         for k in base_filter:
             if not isinstance(k, BaseDataType) and not (isinstance(k, list) and len(k) == 2 and isinstance(k[0], BaseDataType) and isinstance(k[1], BaseDataType)):
@@ -49,21 +49,21 @@ class FastRunContainer:
         self.wikibase_url = str(wikibase_url or config['WIKIBASE_URL'])
         self.use_qualifiers = use_qualifiers
         self.use_references = use_references
-        self.use_cache = use_cache
+        self.cache = cache
         self.case_insensitive = case_insensitive
         self.properties_type: Dict[str, str] = {}
 
         if self.case_insensitive:
             raise ValueError("Case insensitive does not work for the moment.")
 
-    def load_statements(self, claims: Union[List[Claim], Claims, Claim], use_cache: Optional[bool] = None, wb_url: Optional[str] = None, limit: Optional[int] = None) -> None:
+    def load_statements(self, claims: Union[List[Claim], Claims, Claim], cache: Optional[bool] = None, wb_url: Optional[str] = None, limit: Optional[int] = None) -> None:
         """
         Load the statements related to the given claims into the internal cache of the current object.
 
         :param claims: A Claim, Claims or list of Claim
         :param wb_url: The first part of the concept URI of entities.
         :param limit: The limit to request at one time.
-        :param use_cache: Put data returned by WDQS in cache. Enabled by default.
+        :param cache: Put data returned by WDQS in cache. Enabled by default.
         :return:
         """
         if isinstance(claims, Claim):
@@ -71,7 +71,7 @@ class FastRunContainer:
         elif (not isinstance(claims, list) or not all(isinstance(n, Claim) for n in claims)) and not isinstance(claims, Claims):
             raise ValueError("claims must be an instance of Claim or Claims or a list of Claim")
 
-        use_cache = bool(use_cache or self.use_cache)
+        cache = bool(cache or self.cache)
 
         wb_url = wb_url or self.wikibase_url
 
@@ -81,7 +81,7 @@ class FastRunContainer:
             prop_nr = claim.mainsnak.property_number
 
             # Load each property from the Wikibase instance or the cache
-            if use_cache and prop_nr in self.data:
+            if cache and prop_nr in self.data:
                 continue
 
             offset = 0
@@ -335,12 +335,12 @@ class FastRunContainer:
 
         return results
 
-    def get_entities(self, claims: Union[List[Claim], Claims, Claim], use_cache: Optional[bool] = None, query_limit: Optional[int] = None) -> List[str]:
+    def get_entities(self, claims: Union[List[Claim], Claims, Claim], cache: Optional[bool] = None, query_limit: Optional[int] = None) -> List[str]:
         """
         Return a list of entities who correspond to the specified claims.
 
         :param claims: A list of claims to query the SPARQL endpoint.
-        :param use_cache: Put data returned by WDQS in cache. Enabled by default.
+        :param cache: Put data returned by WDQS in cache. Enabled by default.
         :param query_limit: Limit the amount of results from the SPARQL server
         :return: A list of entity ID.
         """
@@ -349,7 +349,7 @@ class FastRunContainer:
         elif (not isinstance(claims, list) or not all(isinstance(n, Claim) for n in claims)) and not isinstance(claims, Claims):
             raise ValueError("claims must be an instance of Claim or Claims or a list of Claim")
 
-        self.load_statements(claims=claims, use_cache=use_cache, limit=query_limit)
+        self.load_statements(claims=claims, cache=cache, limit=query_limit)
 
         result = []
         for base_filter in self.base_filter:
@@ -379,14 +379,14 @@ class FastRunContainer:
             return []
 
     def write_required(self, entity: BaseEntity, property_filter: Union[List[str], str, None] = None, use_qualifiers: Optional[bool] = None, use_references: Optional[bool] = None,
-                       use_cache: Optional[bool] = None, query_limit: Optional[int] = None) -> bool:
+                       cache: Optional[bool] = None, query_limit: Optional[int] = None) -> bool:
         """
 
         :param entity:
         :param property_filter:
         :param use_qualifiers: Use qualifiers during fastrun. Enabled by default.
         :param use_references: Use references during fastrun. Disabled by default.
-        :param use_cache: Put data returned by WDQS in cache. Enabled by default.
+        :param cache: Put data returned by WDQS in cache. Enabled by default.
         :param query_limit: Limit the amount of results from the SPARQL server
         :return: a boolean True if a write is required. False otherwise.
         """
@@ -418,7 +418,7 @@ class FastRunContainer:
         statements_to_check: Dict[str, List[str]] = {}
         for claim in entity.claims:
             if claim.mainsnak.property_number in property_filter:
-                self.load_statements(claims=claim, use_cache=use_cache, limit=query_limit)
+                self.load_statements(claims=claim, cache=cache, limit=query_limit)
                 if claim.mainsnak.property_number in self.data:
                     if not contains(self.data[claim.mainsnak.property_number], (lambda x, c=claim: x == c.get_sparql_value())):
                         # Checks if a property with this value does not exist, return True if none exist
@@ -484,7 +484,7 @@ class FastRunContainer:
         return False
 
 
-def get_fastrun_container(base_filter: List[BaseDataType | List[BaseDataType]], use_qualifiers: bool = True, use_references: bool = False, use_cache: bool = True,
+def get_fastrun_container(base_filter: List[BaseDataType | List[BaseDataType]], use_qualifiers: bool = True, use_references: bool = False, cache: bool = True,
                           case_insensitive: bool = False) -> FastRunContainer:
     """
     Return a FastRunContainer object, create a new one if it doesn't already exist.
@@ -492,7 +492,7 @@ def get_fastrun_container(base_filter: List[BaseDataType | List[BaseDataType]], 
     :param base_filter: The default filter to initialize the dataset. A list made of BaseDataType or list of BaseDataType.
     :param use_qualifiers: Use qualifiers during fastrun. Enabled by default.
     :param use_references: Use references during fastrun. Disabled by default.
-    :param use_cache: Put data returned by WDQS in cache. Enabled by default.
+    :param cache: Put data returned by WDQS in cache. Enabled by default.
     :param case_insensitive:
     :return: a FastRunContainer object
     """
@@ -501,12 +501,12 @@ def get_fastrun_container(base_filter: List[BaseDataType | List[BaseDataType]], 
 
     # We search if we already have a FastRunContainer with the same parameters to re-use it
     fastrun_container = _search_fastrun_store(base_filter=base_filter, use_qualifiers=use_qualifiers, use_references=use_references, case_insensitive=case_insensitive,
-                                              use_cache=use_cache)
+                                              cache=cache)
 
     return fastrun_container
 
 
-def _search_fastrun_store(base_filter: List[BaseDataType | List[BaseDataType]], use_qualifiers: bool = True, use_references: bool = False, use_cache: bool = True,
+def _search_fastrun_store(base_filter: List[BaseDataType | List[BaseDataType]], use_qualifiers: bool = True, use_references: bool = False, cache: bool = True,
                           case_insensitive: bool = False) -> FastRunContainer:
     """
     Search for an existing FastRunContainer with the same parameters or create a new one if it doesn't exist.
@@ -514,20 +514,20 @@ def _search_fastrun_store(base_filter: List[BaseDataType | List[BaseDataType]], 
     :param base_filter: The default filter to initialize the dataset. A list made of BaseDataType or list of BaseDataType.
     :param use_qualifiers: Use qualifiers during fastrun. Enabled by default.
     :param use_references: Use references during fastrun. Disabled by default.
-    :param use_cache: Put data returned by WDQS in cache. Enabled by default.
+    :param cache: Put data returned by WDQS in cache. Enabled by default.
     :param case_insensitive:
     :return: a FastRunContainer object
     """
     for fastrun in fastrun_store:
         if (fastrun.base_filter == base_filter) and (fastrun.use_qualifiers == use_qualifiers) and (fastrun.use_references == use_references) and (
                 fastrun.case_insensitive == case_insensitive) and (fastrun.sparql_endpoint_url == config['SPARQL_ENDPOINT_URL']):
-            fastrun.use_cache = use_cache
+            fastrun.cache = cache
             return fastrun
 
     # In case nothing was found in the fastrun_store
     log.info("Create a new FastRunContainer")
 
-    fastrun_container = FastRunContainer(base_data_type=BaseDataType, base_filter=base_filter, use_qualifiers=use_qualifiers, use_references=use_references, use_cache=use_cache,
+    fastrun_container = FastRunContainer(base_data_type=BaseDataType, base_filter=base_filter, use_qualifiers=use_qualifiers, use_references=use_references, cache=cache,
                                          case_insensitive=case_insensitive)
     fastrun_store.append(fastrun_container)
     return fastrun_container
