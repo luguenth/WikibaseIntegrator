@@ -60,7 +60,7 @@ class Form(BaseDataType):
 
     # TODO: add from_sparql_value()
 
-    def get_sparql_value(self, **kwargs) -> Optional[str]:
+    def get_sparql_value(self, **kwargs: Any) -> Optional[str]:
         if self.mainsnak.snaktype == WikibaseSnakType.KNOWN_VALUE:
             wikibase_url = str(kwargs['wikibase_url'] if 'wikibase_url' in kwargs else config['WIKIBASE_URL'])
             return f'<{wikibase_url}/entity/' + self.mainsnak.datavalue['value']['id'] + '>'

@@ -47,7 +47,7 @@ class BaseDataType(Claim):
     def set_value(self, value: Optional[Any] = None):
         pass
 
-    def get_sparql_value(self, **kwargs) -> Optional[str]:
+    def get_sparql_value(self, **kwargs: Any) -> Optional[str]:
         return '"' + self.mainsnak.datavalue['value'] + '"'
 
     def parse_sparql_value(self, value, type='literal', unit='1') -> bool:
