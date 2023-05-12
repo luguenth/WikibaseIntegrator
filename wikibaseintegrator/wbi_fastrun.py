@@ -470,8 +470,8 @@ class FastRunContainer:
                             if use_references:
                                 references = self._load_references(statement['sid'], limit=100)
 
-                                if len(references) != len(claim.references):
-                                    logging.debug("Difference in number of references, '%i' != '%i'", len(references), len(claim.references))
+                                if sum(len(ref) for ref in references) != sum(len(x) for x in claim.references):
+                                    logging.debug("Difference in number of references, '%i' != '%i'", sum(len(ref) for ref in references), sum(len(x) for x in claim.references))
                                     return True
 
                                 for reference in references:
