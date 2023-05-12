@@ -7,6 +7,7 @@ from typing import Dict, List, Optional, Type, Union
 from wikibaseintegrator.datatypes import BaseDataType
 from wikibaseintegrator.models import Claim, Claims, Qualifiers, Reference, References
 from wikibaseintegrator.wbi_config import config
+from wikibaseintegrator.wbi_enums import WikibaseRank
 from wikibaseintegrator.wbi_helpers import execute_sparql_query
 
 log = logging.getLogger(__name__)
@@ -21,6 +22,7 @@ class FastRunContainer:
     :param base_data_type: The default data type to create objects.
     :param use_qualifiers: Use qualifiers during fastrun. Enabled by default.
     :param use_references: Use references during fastrun. Disabled by default.
+    :param use_rank: Use rank during fastrun. Disabled by default.
     :param cache: Put data returned by WDQS in cache. Enabled by default.
     :param case_insensitive: <not used at this moment>
     :param sparql_endpoint_url: SPARLQ endpoint URL.
@@ -31,8 +33,8 @@ class FastRunContainer:
 
     data: Dict[str, Dict[str, List[Dict[str, str]]]]
 
-    def __init__(self, base_filter: List[BaseDataType | List[BaseDataType]], base_data_type: Optional[Type[BaseDataType]] = None, use_qualifiers: bool = True, use_references: bool = False,
-                 cache: bool = True, case_insensitive: bool = False, sparql_endpoint_url: Optional[str] = None, wikibase_url: Optional[str] = None):
+    def __init__(self, base_filter: List[BaseDataType | List[BaseDataType]], base_data_type: Optional[Type[BaseDataType]] = None, use_qualifiers: bool = True, use_references: bool = False, use_rank: bool = False, cache: bool = True,
+                 case_insensitive: bool = False, sparql_endpoint_url: Optional[str] = None, wikibase_url: Optional[str] = None):
 
         for k in base_filter:
             if not isinstance(k, BaseDataType) and not (isinstance(k, list) and len(k) == 2 and isinstance(k[0], BaseDataType) and isinstance(k[1], BaseDataType)):
@@ -46,6 +48,7 @@ class FastRunContainer:
         self.wikibase_url = str(wikibase_url or config['WIKIBASE_URL'])
         self.use_qualifiers = use_qualifiers
         self.use_references = use_references
+        self.use_rank = use_rank
         self.cache = cache
         self.case_insensitive = case_insensitive
         self.properties_type: Dict[str, str] = {}
@@ -158,8 +161,7 @@ class FastRunContainer:
                 '''
 
                 # Format the query
-                query = query.format(base_filter_string=base_filter_string, wb_url=wb_url, prop_nr=prop_nr, offset=str(offset), limit=str(limit),
-                                     qualifiers_filter_string=qualifiers_filter_string)
+                query = query.format(base_filter_string=base_filter_string, wb_url=wb_url, prop_nr=prop_nr, offset=str(offset), limit=str(limit), qualifiers_filter_string=qualifiers_filter_string)
 
                 offset += limit  # We increase the offset for the next iteration
                 results = execute_sparql_query(query=query, endpoint=self.sparql_endpoint_url)['results']['bindings']
@@ -307,6 +309,40 @@ class FastRunContainer:
 
         return references
 
+    def _load_rank(self, sid: str) -> Optional[WikibaseRank]:
+        """
+        Load the rank of a statement.
+
+        :param sid: A statement ID.
+        :param limit: The limit to request at one time.
+        :return: A References object.
+        """
+
+        if not isinstance(sid, str):
+            raise ValueError('sid must be a string')
+
+        query = f'''
+        #Tool: WikibaseIntegrator wbi_fastrun._load_rank
+        SELECT ?rank WHERE {{
+          VALUES ?sid {{ <{sid}> }}
+          ?sid wikibase:rank ?rank.
+        }}
+        '''
+
+        results = execute_sparql_query(query=query, endpoint=self.sparql_endpoint_url)['results']['bindings']
+
+        for result in results:
+            rank_raw = result['rank']['value'].rsplit('#', 1)[-1]
+
+            if rank_raw == 'PreferredRank':
+                return WikibaseRank.PREFERRED
+            elif rank_raw == 'NormalRank':
+                return WikibaseRank.NORMAL
+            elif rank_raw == 'DeprecatedRank':
+                return WikibaseRank.DEPRECATED
+
+        return None
+
     def _get_property_type(self, prop_nr: Union[str, int]) -> str:
         """
         Obtain the property type of the given property by looking at the SPARQL endpoint.
@@ -376,7 +412,7 @@ class FastRunContainer:
             return []
 
     def write_required(self, claims: Union[List[Claim], Claims, Claim], entity_filter: Union[List[str], str, None] = None, property_filter: Union[List[str], str, None] = None, use_qualifiers: Optional[bool] = None,
-                       use_references: Optional[bool] = None, cache: Optional[bool] = None, query_limit: Optional[int] = None) -> bool:
+                       use_references: Optional[bool] = None, use_rank: Optional[bool] = None, cache: Optional[bool] = None, query_limit: Optional[int] = None) -> bool:
         """
 
         :param claims:
@@ -384,6 +420,7 @@ class FastRunContainer:
         :param property_filter: Allows you to limit the difference comparison to a list of properties
         :param use_qualifiers: Use qualifiers during fastrun. Enabled by default.
         :param use_references: Use references during fastrun. Disabled by default.
+        :param use_rank: Use rank during fastrun. Disabled by default.
         :param cache: Put data returned by WDQS in cache. Enabled by default.
         :param query_limit: Limit the amount of results from the SPARQL server
         :return: a boolean True if a write is required. False otherwise.
@@ -409,6 +446,7 @@ class FastRunContainer:
 
         use_qualifiers = bool(use_qualifiers or self.use_qualifiers)
         use_references = bool(use_references or self.use_references)
+        use_rank = bool(use_rank or self.use_rank)
 
         def contains(in_list, lambda_filter):
             for x in in_list:
@@ -485,19 +523,25 @@ class FastRunContainer:
                                         logging.debug("Difference between two references")
                                         return True
 
+                            if use_rank:
+                                rank = self._load_rank(statement['sid'])
+
+                                if claim.rank != rank:
+                                    logging.debug("Difference with the rank")
+                                    return True
                             # TODO: Add use_rank to compare rank ?
 
         return False
 
 
-def get_fastrun_container(base_filter: List[BaseDataType | List[BaseDataType]], use_qualifiers: bool = True, use_references: bool = False, cache: bool = True,
-                          case_insensitive: bool = False) -> FastRunContainer:
+def get_fastrun_container(base_filter: List[BaseDataType | List[BaseDataType]], use_qualifiers: bool = True, use_references: bool = False, use_rank: bool = False, cache: bool = True, case_insensitive: bool = False) -> FastRunContainer:
     """
     Return a FastRunContainer object, create a new one if it doesn't already exist.
 
     :param base_filter: The default filter to initialize the dataset. A list made of BaseDataType or list of BaseDataType.
     :param use_qualifiers: Use qualifiers during fastrun. Enabled by default.
     :param use_references: Use references during fastrun. Disabled by default.
+    :param use_rank: Use rank during fastrun. Disabled by default.
     :param cache: Put data returned by WDQS in cache. Enabled by default.
     :param case_insensitive:
     :return: a FastRunContainer object
@@ -506,34 +550,32 @@ def get_fastrun_container(base_filter: List[BaseDataType | List[BaseDataType]], 
         base_filter = []
 
     # We search if we already have a FastRunContainer with the same parameters to re-use it
-    fastrun_container = _search_fastrun_store(base_filter=base_filter, use_qualifiers=use_qualifiers, use_references=use_references, case_insensitive=case_insensitive,
-                                              cache=cache)
+    fastrun_container = _search_fastrun_store(base_filter=base_filter, use_qualifiers=use_qualifiers, use_references=use_references, use_rank=use_rank, case_insensitive=case_insensitive, cache=cache)
 
     return fastrun_container
 
 
-def _search_fastrun_store(base_filter: List[BaseDataType | List[BaseDataType]], use_qualifiers: bool = True, use_references: bool = False, cache: bool = True,
-                          case_insensitive: bool = False) -> FastRunContainer:
+def _search_fastrun_store(base_filter: List[BaseDataType | List[BaseDataType]], use_qualifiers: bool = True, use_references: bool = False, use_rank: bool = False, cache: bool = True, case_insensitive: bool = False) -> FastRunContainer:
     """
     Search for an existing FastRunContainer with the same parameters or create a new one if it doesn't exist.
 
     :param base_filter: The default filter to initialize the dataset. A list made of BaseDataType or list of BaseDataType.
     :param use_qualifiers: Use qualifiers during fastrun. Enabled by default.
     :param use_references: Use references during fastrun. Disabled by default.
+    :param use_rank: Use rank during fastrun. Disabled by default.
     :param cache: Put data returned by WDQS in cache. Enabled by default.
     :param case_insensitive:
     :return: a FastRunContainer object
     """
     for fastrun in fastrun_store:
-        if (fastrun.base_filter == base_filter) and (fastrun.use_qualifiers == use_qualifiers) and (fastrun.use_references == use_references) and (
-                fastrun.case_insensitive == case_insensitive) and (fastrun.sparql_endpoint_url == config['SPARQL_ENDPOINT_URL']):
+        if (fastrun.base_filter == base_filter) and (fastrun.use_qualifiers == use_qualifiers) and (fastrun.use_references == use_references) and (fastrun.use_rank == use_rank) and (fastrun.case_insensitive == case_insensitive) and (
+                fastrun.sparql_endpoint_url == config['SPARQL_ENDPOINT_URL']):
             fastrun.cache = cache
             return fastrun
 
     # In case nothing was found in the fastrun_store
     log.info("Create a new FastRunContainer")
 
-    fastrun_container = FastRunContainer(base_data_type=BaseDataType, base_filter=base_filter, use_qualifiers=use_qualifiers, use_references=use_references, cache=cache,
-                                         case_insensitive=case_insensitive)
+    fastrun_container = FastRunContainer(base_data_type=BaseDataType, base_filter=base_filter, use_qualifiers=use_qualifiers, use_references=use_references, use_rank=use_rank, cache=cache, case_insensitive=case_insensitive)
     fastrun_store.append(fastrun_container)
     return fastrun_container
