@@ -68,7 +68,7 @@ class TestFastRun(unittest.TestCase):
         fastrun_result = frc.write_required(entity=entity)
 
         # here, fastrun should succeed, if not, test failed
-        if fastrun_result:
+        if not fastrun_result:
             raise ValueError
 
 

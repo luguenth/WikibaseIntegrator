@@ -124,24 +124,46 @@ class FastRunContainer:
             self.data[prop_nr] = {}
 
             while True:
-                query = '''
-                #Tool: WikibaseIntegrator wbi_fastrun.load_statements
-                SELECT ?entity ?sid ?value ?property_type WHERE {{
-                  # Base filter string
-                  {base_filter_string}
-                  ?entity <{wb_url}/prop/{prop_nr}> ?sid.
-                  <{wb_url}/entity/{prop_nr}> wikibase:propertyType ?property_type.
-                  ?sid <{wb_url}/prop/statement/{prop_nr}> ?value.
-                  {qualifiers_filter_string}
-                }}
-                ORDER BY ?sid
-                OFFSET {offset}
-                LIMIT {limit}
-                '''
+                if claim.mainsnak.datavalue:
+                    query = '''
+                    #Tool: WikibaseIntegrator wbi_fastrun.load_statements
+                    SELECT ?entity ?sid ?value ?property_type WHERE {{
+                      # Base filter string
+                      {base_filter_string}
+                      ?entity <{wb_url}/prop/{prop_nr}> ?sid.
+                      <{wb_url}/entity/{prop_nr}> wikibase:propertyType ?property_type.
+                      ?sid <{wb_url}/prop/statement/{prop_nr}> ?value.
+                      ?sid <{wb_url}/prop/statement/{prop_nr}> {value}.
+                      {qualifiers_filter_string}
+                    }}
+                    ORDER BY ?sid
+                    OFFSET {offset}
+                    LIMIT {limit}
+                    '''
 
-                # Format the query
-                query = query.format(base_filter_string=base_filter_string, wb_url=wb_url, prop_nr=prop_nr, offset=str(offset), limit=str(limit),
-                                     qualifiers_filter_string=qualifiers_filter_string)
+                    # Format the query
+                    query = query.format(base_filter_string=base_filter_string, wb_url=wb_url, prop_nr=prop_nr, offset=str(offset), limit=str(limit),
+                                         value=claim.get_sparql_value(wikibase_url=wb_url), qualifiers_filter_string=qualifiers_filter_string)
+                else:
+                    query = '''
+                    #Tool: WikibaseIntegrator wbi_fastrun.load_statements
+                    SELECT ?entity ?sid ?value ?property_type WHERE {{
+                      # Base filter string
+                      {base_filter_string}
+                      ?entity <{wb_url}/prop/{prop_nr}> ?sid.
+                      <{wb_url}/entity/{prop_nr}> wikibase:propertyType ?property_type.
+                      ?sid <{wb_url}/prop/statement/{prop_nr}> ?value.
+                      {qualifiers_filter_string}
+                    }}
+                    ORDER BY ?sid
+                    OFFSET {offset}
+                    LIMIT {limit}
+                    '''
+
+                    # Format the query
+                    query = query.format(base_filter_string=base_filter_string, wb_url=wb_url, prop_nr=prop_nr, offset=str(offset), limit=str(limit),
+                                         qualifiers_filter_string=qualifiers_filter_string)
+
                 offset += limit  # We increase the offset for the next iteration
                 results = execute_sparql_query(query=query, endpoint=self.sparql_endpoint_url)['results']['bindings']
 
@@ -418,6 +440,7 @@ class FastRunContainer:
 
         # If there is none common entities, return True because we need a write
         if not common_entities:
+            logging.debug("There is no common entities")
             return True
 
         # If the property is already found, load it completely to compare deeply
