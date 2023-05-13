@@ -72,7 +72,8 @@ class FastRunContainer:
         elif (not isinstance(claims, list) or not all(isinstance(n, Claim) for n in claims)) and not isinstance(claims, Claims):
             raise ValueError("claims must be an instance of Claim or Claims or a list of Claim")
 
-        cache = bool(cache or self.cache)
+        if cache is None:
+            cache = self.cache
 
         wb_url = wb_url or self.wikibase_url
 
@@ -446,9 +447,12 @@ class FastRunContainer:
         if property_filter is None:
             property_filter = [claim.mainsnak.property_number for claim in claims]
 
-        use_qualifiers = bool(use_qualifiers or self.use_qualifiers)
-        use_references = bool(use_references or self.use_references)
-        use_rank = bool(use_rank or self.use_rank)
+        if use_qualifiers is None:
+            use_qualifiers = self.use_qualifiers
+        if use_references is None:
+            use_references = self.use_references
+        if use_rank is None:
+            use_rank = self.use_rank
 
         def contains(in_list, lambda_filter):
             for x in in_list:
