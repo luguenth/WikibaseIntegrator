@@ -33,8 +33,9 @@ class FastRunContainer:
 
     data: Dict[str, Dict[str, List[Dict[str, str]]]]
 
-    def __init__(self, base_filter: List[BaseDataType | List[BaseDataType]], base_data_type: Optional[Type[BaseDataType]] = None, use_qualifiers: bool = True, use_references: bool = False, use_rank: bool = False, cache: bool = True,
-                 case_insensitive: bool = False, sparql_endpoint_url: Optional[str] = None, wikibase_url: Optional[str] = None):
+    def __init__(self, base_filter: List[BaseDataType | List[BaseDataType]], base_data_type: Optional[Type[BaseDataType]] = None, use_qualifiers: bool = True,
+                 use_references: bool = False, use_rank: bool = False, cache: bool = True, case_insensitive: bool = False, sparql_endpoint_url: Optional[str] = None,
+                 wikibase_url: Optional[str] = None):
 
         for k in base_filter:
             if not isinstance(k, BaseDataType) and not (isinstance(k, list) and len(k) == 2 and isinstance(k[0], BaseDataType) and isinstance(k[1], BaseDataType)):
@@ -411,8 +412,9 @@ class FastRunContainer:
         else:
             return []
 
-    def write_required(self, claims: Union[List[Claim], Claims, Claim], entity_filter: Union[List[str], str, None] = None, property_filter: Union[List[str], str, None] = None, use_qualifiers: Optional[bool] = None,
-                       use_references: Optional[bool] = None, use_rank: Optional[bool] = None, cache: Optional[bool] = None, query_limit: Optional[int] = None) -> bool:
+    def write_required(self, claims: Union[List[Claim], Claims, Claim], entity_filter: Union[List[str], str, None] = None, property_filter: Union[List[str], str, None] = None,
+                       use_qualifiers: Optional[bool] = None, use_references: Optional[bool] = None, use_rank: Optional[bool] = None, cache: Optional[bool] = None,
+                       query_limit: Optional[int] = None) -> bool:
         """
 
         :param claims:
@@ -534,7 +536,8 @@ class FastRunContainer:
         return False
 
 
-def get_fastrun_container(base_filter: List[BaseDataType | List[BaseDataType]], use_qualifiers: bool = True, use_references: bool = False, use_rank: bool = False, cache: bool = True, case_insensitive: bool = False) -> FastRunContainer:
+def get_fastrun_container(base_filter: List[BaseDataType | List[BaseDataType]], use_qualifiers: bool = True, use_references: bool = False, use_rank: bool = False,
+                          cache: bool = True, case_insensitive: bool = False) -> FastRunContainer:
     """
     Return a FastRunContainer object, create a new one if it doesn't already exist.
 
@@ -550,12 +553,14 @@ def get_fastrun_container(base_filter: List[BaseDataType | List[BaseDataType]], 
         base_filter = []
 
     # We search if we already have a FastRunContainer with the same parameters to re-use it
-    fastrun_container = _search_fastrun_store(base_filter=base_filter, use_qualifiers=use_qualifiers, use_references=use_references, use_rank=use_rank, case_insensitive=case_insensitive, cache=cache)
+    fastrun_container = _search_fastrun_store(base_filter=base_filter, use_qualifiers=use_qualifiers, use_references=use_references, use_rank=use_rank,
+                                              case_insensitive=case_insensitive, cache=cache)
 
     return fastrun_container
 
 
-def _search_fastrun_store(base_filter: List[BaseDataType | List[BaseDataType]], use_qualifiers: bool = True, use_references: bool = False, use_rank: bool = False, cache: bool = True, case_insensitive: bool = False) -> FastRunContainer:
+def _search_fastrun_store(base_filter: List[BaseDataType | List[BaseDataType]], use_qualifiers: bool = True, use_references: bool = False, use_rank: bool = False,
+                          cache: bool = True, case_insensitive: bool = False) -> FastRunContainer:
     """
     Search for an existing FastRunContainer with the same parameters or create a new one if it doesn't exist.
 
@@ -568,14 +573,15 @@ def _search_fastrun_store(base_filter: List[BaseDataType | List[BaseDataType]], 
     :return: a FastRunContainer object
     """
     for fastrun in fastrun_store:
-        if (fastrun.base_filter == base_filter) and (fastrun.use_qualifiers == use_qualifiers) and (fastrun.use_references == use_references) and (fastrun.use_rank == use_rank) and (fastrun.case_insensitive == case_insensitive) and (
-                fastrun.sparql_endpoint_url == config['SPARQL_ENDPOINT_URL']):
+        if (fastrun.base_filter == base_filter) and (fastrun.use_qualifiers == use_qualifiers) and (fastrun.use_references == use_references) and (
+                fastrun.use_rank == use_rank) and (fastrun.case_insensitive == case_insensitive) and (fastrun.sparql_endpoint_url == config['SPARQL_ENDPOINT_URL']):
             fastrun.cache = cache
             return fastrun
 
     # In case nothing was found in the fastrun_store
     log.info("Create a new FastRunContainer")
 
-    fastrun_container = FastRunContainer(base_data_type=BaseDataType, base_filter=base_filter, use_qualifiers=use_qualifiers, use_references=use_references, use_rank=use_rank, cache=cache, case_insensitive=case_insensitive)
+    fastrun_container = FastRunContainer(base_data_type=BaseDataType, base_filter=base_filter, use_qualifiers=use_qualifiers, use_references=use_references, use_rank=use_rank,
+                                         cache=cache, case_insensitive=case_insensitive)
     fastrun_store.append(fastrun_container)
     return fastrun_container
