@@ -84,6 +84,7 @@ class FastRunContainer:
 
             # Load each property from the Wikibase instance or the cache
             if cache and prop_nr in self.data:
+                logging.debug("Property '%s' found in cache, %s elements", prop_nr, len(self.data[prop_nr]))
                 continue
 
             offset = 0
@@ -92,6 +93,7 @@ class FastRunContainer:
             base_filter_string = ''
             for k in self.base_filter:
                 if isinstance(k, BaseDataType):
+                    # TODO: Add multiple values for a property (OR-operation) (with the VALUES tag?)
                     if k.mainsnak.datavalue:
                         base_filter_string += '?entity <{wb_url}/prop/direct/{prop_nr}> {entity} .\n'.format(
                             wb_url=wb_url, prop_nr=k.mainsnak.property_number, entity=k.get_sparql_value(wikibase_url=wb_url))
